@@ -1,0 +1,3329 @@
+diff --git a/__init__.py b/__init__.py
+index 2181302..00c46c2 100644
+--- a/__init__.py
++++ b/__init__.py
+@@ -143,13 +143,10 @@ try:
+         else:
+             is_texture_stage = target_size == 1024
+ 
+-        if self.low_vram and not is_texture_stage:
++        if self.low_vram:
+             image_cond_model.to(device)
+-            image_cond_model.naf_tile_factor = 4
+-        else:
+-            if self.low_vram:
+-                image_cond_model.to(device)
+-            image_cond_model.naf_tile_factor = 1
++            # Stream NAF for texture too; the full 1024 path exceeds 6 GB VRAM.
++            image_cond_model.naf_tile_factor = int(os.environ.get('TRELLIS2_NAF_TILE_FACTOR', '4'))
+         
+         orig_grid_res = image_cond_model.grid_resolution
+         if grid_resolution_override is not None and grid_resolution_override != orig_grid_res:
+@@ -202,4 +199,5 @@ except Exception as e:
+ 
+ from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+ 
+-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+\ No newline at end of file
++__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
++
+diff --git a/nodes.py b/nodes.py
+index 5875ed4..2369965 100644
+--- a/nodes.py
++++ b/nodes.py
+@@ -38,6 +38,8 @@ class TolerantList(list):
+ 
+ 
+ import pymeshlab
++from scipy.sparse import coo_matrix
++from scipy.sparse.csgraph import connected_components
+ 
+ import cumesh as CuMesh
+ import o_voxel
+@@ -213,6 +215,55 @@ class ImageUtils:
+         return pil_array
+ 
+ class MeshUtils:
++    @staticmethod
++    def remove_floater_by_edges(vertices, faces, ratio=0.005):
++        """Select by edge-connected face count without a MeshLab geometry copy."""
++        if len(faces) == 0:
++            return vertices[:0].copy(), faces.copy()
++        # Store each unoriented vertex-index edge in one uint64, retaining all
++        # incident faces even when more than two faces share an edge.
++        keys = np.empty((len(faces), 3), dtype=np.uint64)
++        for column, (a, b) in enumerate(((0, 1), (1, 2), (2, 0))):
++            keys[:, column] = np.minimum(faces[:, a], faces[:, b])
++            keys[:, column] <<= np.uint64(32)
++            keys[:, column] |= np.maximum(faces[:, a], faces[:, b]).astype(np.uint64)
++        keys = keys.reshape(-1)
++        order = np.argsort(keys)
++        keys = keys[order]
++        shared = np.flatnonzero(keys[1:] == keys[:-1])
++        del keys
++        first = (order[shared] // 3).astype(np.int32)
++        second = (order[shared + 1] // 3).astype(np.int32)
++        del order, shared
++        graph = coo_matrix((np.ones(len(first), dtype=np.bool_), (first, second)),
++                           shape=(len(faces), len(faces))).tocsr()
++        del first, second
++        _, labels = connected_components(graph, directed=False, return_labels=True)
++        del graph
++        counts = np.bincount(labels)
++        # MeshLab truncates the relative count threshold to an integer and selects
++        # strictly smaller components. Preserve that existing policy.
++        keep = counts[labels] >= int(counts.max() * ratio)
++        del labels, counts
++        new_faces = faces[keep]
++        referenced, inverse = np.unique(new_faces, return_inverse=True)
++        return np.ascontiguousarray(vertices[referenced]), np.ascontiguousarray(inverse.reshape(-1, 3), dtype=faces.dtype)
++
++    @staticmethod
++    def clean_mesh_faces(vertices, faces):
++        # Test exact area in float64 without discarding small but valid triangles.
++        triangles = vertices[faces].astype(np.float64)
++        cross = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
++        valid = np.any(cross != 0, axis=1)
++        faces = faces[valid]
++        # Compare positions without welding split vertices or removing reverse faces.
++        _, position_ids = np.unique(vertices, axis=0, return_inverse=True)
++        keys = position_ids[faces]
++        rotation = keys.argmin(axis=1)
++        keys = np.take_along_axis(keys, (rotation[:, None] + np.arange(3)) % 3, axis=1)
++        _, first = np.unique(keys, axis=0, return_index=True)
++        return np.ascontiguousarray(faces[np.sort(first)])
++
+     @staticmethod
+     def simplify_with_meshlib(vertices, faces, target=1000000):
+         current_faces_num = len(faces)
+@@ -1656,6 +1707,17 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
+ 
+     def process(self, mesh, mesh_cluster_threshold_cone_half_angle_rad, mesh_cluster_refine_iterations, mesh_cluster_global_iterations, mesh_cluster_smooth_strength, texture_size, remesh, remesh_band, remesh_project, target_face_num, simplify_method, fill_holes, texture_alpha_mode, dual_contouring_resolution, double_side_material, remove_floaters, bake_on_vertices,use_custom_normals,uv_unwrap_method,bvh,remove_inner_faces):
+         pbar = ProgressBar(5 if not bake_on_vertices else 4)
++        coordinate_system = getattr(mesh, 'coordinate_system', 'z_up')
++
++        if mesh.attrs is None or mesh.coords is None:
++            vertices = mesh.vertices.detach().cpu().numpy().copy() if torch.is_tensor(mesh.vertices) else np.array(mesh.vertices, copy=True)
++            faces = mesh.faces.detach().cpu().numpy() if torch.is_tensor(mesh.faces) else np.asarray(mesh.faces)
++            if coordinate_system == 'z_up':
++                vertices[:, 1], vertices[:, 2] = vertices[:, 2].copy(), -vertices[:, 1].copy()
++            trimesh = Trimesh.Trimesh(vertices=vertices, faces=faces.astype(np.int64, copy=False), process=False)
++            empty_texture = ImageUtils.pil_to_tensor(Image.new("RGBA", (1, 1), (0, 0, 0, 0)))
++            return (trimesh, empty_texture, empty_texture)
++
+         mesh_copy = copy.deepcopy(mesh)
+         
+         aabb = [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]]
+@@ -1691,7 +1753,9 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
+                 grid_size = torch.tensor(grid_size, dtype=torch.int32, device=coords.device)
+             voxel_size = (aabb[1] - aabb[0]) / grid_size
+         
+-        if remove_floaters:
++        # Raw dual-grid fragments can form valid strands after reconstruction.
++        # The remesh branch cleans components after rebuilding their connections.
++        if remove_floaters and not remesh:
+             mesh_copy = MeshUtils.remove_floater(mesh_copy)
+             
+         vertices = mesh_copy.vertices
+@@ -1768,7 +1832,9 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
+             new_vertices, new_faces = cumesh.read()
+             
+             if remove_floaters:
+-                new_vertices, new_faces = MeshUtils.remove_floater2(new_vertices.cpu().numpy(),new_faces.cpu().numpy())
++                new_vertices, new_faces = MeshUtils.remove_floater_by_edges(new_vertices.cpu().numpy(), new_faces.cpu().numpy())
++                # Reinitialization must not reuse topology from the pre-filter mesh.
++                cumesh.clear_cache()
+                 new_vertices = torch.from_numpy(new_vertices).contiguous().float().cuda()
+                 new_faces = torch.from_numpy(new_faces).contiguous().int().cuda()
+                 cumesh.init(new_vertices, new_faces)                    
+@@ -1786,9 +1852,12 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
+             print(f"After simplifying: {cumesh.num_vertices} vertices, {cumesh.num_faces} faces")            
+             pbar.update(1)
+             
++        new_vertices, new_faces = cumesh.read()
++        new_vertices = new_vertices.detach().cpu().numpy()
++        new_faces = MeshUtils.clean_mesh_faces(new_vertices, new_faces.detach().cpu().numpy())
++
+         if fill_holes:
+-            new_vertices, new_faces = cumesh.read()
+-            meshlib_mesh = mrmeshnumpy.meshFromFacesVerts(new_faces.detach().clone().cpu().numpy(), new_vertices.detach().clone().cpu().numpy())
++            meshlib_mesh = mrmeshnumpy.meshFromFacesVerts(new_faces, new_vertices)
+             hole_edges = meshlib_mesh.topology.findHoleRepresentiveEdges()
+             holes_filled = 0
+             
+@@ -1826,13 +1895,17 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
+                             
+                 progress_bar.close()                 
+             
+-            new_vertices = mrmeshnumpy.getNumpyVerts(meshlib_mesh)
+-            new_faces = mrmeshnumpy.getNumpyFaces(meshlib_mesh.topology)
++            new_vertices = mrmeshnumpy.getNumpyVerts(meshlib_mesh).astype(np.float32, copy=False)
++            new_faces = MeshUtils.clean_mesh_faces(new_vertices, mrmeshnumpy.getNumpyFaces(meshlib_mesh.topology))
+ 
+             del meshlib_mesh
+             gc.collect()
+-            
+-            cumesh.init(torch.from_numpy(new_vertices).float().to(coords.device), torch.from_numpy(new_faces).int().to(coords.device))
++
++        # init replaces geometry but retains CuMesh topology caches.
++        cumesh.clear_cache()
++        cumesh.init(torch.from_numpy(new_vertices).float().to(coords.device), torch.from_numpy(new_faces).int().to(coords.device))
++        cumesh.remove_unreferenced_vertices()
++        cumesh.clear_cache()
+         
+         # --- Branch: Bake On Vertices (skip UV unwrapping and texture creation) ---
+         if bake_on_vertices:
+@@ -1891,9 +1964,9 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
+             faces_np = out_faces.cpu().numpy()
+             normals_np = out_normals.cpu().numpy()
+             
+-            # Swap Y and Z axes, invert Y (common conversion for GLB compatibility)
+-            vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2].copy(), -vertices_np[:, 1].copy()
+-            normals_np[:, 1], normals_np[:, 2] = normals_np[:, 2].copy(), -normals_np[:, 1].copy()
++            if coordinate_system == 'z_up':
++                vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2].copy(), -vertices_np[:, 1].copy()
++                normals_np[:, 1], normals_np[:, 2] = normals_np[:, 2].copy(), -normals_np[:, 1].copy()
+             
+             # Create mesh with vertex colors using ColorVisuals
+             if use_custom_normals:
+@@ -2006,25 +2079,29 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
+         
+         # Interpolate 3D positions in UV space (finding 3D coord for every texel)
+         pos = dr.interpolate(out_vertices.unsqueeze(0), rast, out_faces_int32)[0][0]
+-        valid_pos = pos[mask]
+-        
+-        # Map these positions back to the *original* high-res mesh to get accurate attributes
+-        # This corrects geometric errors introduced by simplification/remeshing
+-        _, face_id, uvw = bvh.unsigned_distance(valid_pos, return_uvw=True)
+-        orig_tri_verts = bvh.vertices[bvh.faces[face_id.long()]] # (N_new, 3, 3)
+-        valid_pos = (orig_tri_verts * uvw.unsqueeze(-1)).sum(dim=1)        
+-        
+-        torch.cuda.synchronize()
+-        
+-        # Trilinear sampling from the attribute volume (Color, Material props)
+-        attrs = torch.zeros(texture_size, texture_size, attr_volume.shape[1], device='cuda')
+-        attrs[mask] = grid_sample_3d(
+-            attr_volume,
+-            torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1),
+-            shape=torch.Size([1, attr_volume.shape[1], *grid_size.tolist()]),
+-            grid=((valid_pos - aabb[0]) / voxel_size).reshape(1, -1, 3),
+-            mode='trilinear',
+-        )
++        # Sample an occupancy channel too: black material is valid texture data.
++        sample_volume = torch.cat([attr_volume, torch.ones_like(attr_volume[:, :1])], dim=-1)
++        sample_coords = torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1)
++        attrs = torch.zeros(texture_size, texture_size, attr_volume.shape[1], device=pos.device)
++        sample_valid = torch.zeros(texture_size, texture_size, dtype=torch.bool, device=pos.device)
++        active_pixels = mask.reshape(-1).nonzero().flatten()
++        flat_pos = pos.reshape(-1, 3)
++        flat_attrs = attrs.reshape(-1, attr_volume.shape[1])
++        for start in range(0, active_pixels.numel(), 262144):
++            active = active_pixels[start:start + 262144]
++            _, face_id, uvw = bvh.unsigned_distance(flat_pos[active], return_uvw=True)
++            orig_tri_verts = bvh.vertices[bvh.faces[face_id.long()]]
++            mapped_pos = (orig_tri_verts * uvw.unsqueeze(-1)).sum(dim=1)
++            sampled = grid_sample_3d(
++                sample_volume,
++                sample_coords,
++                shape=torch.Size([1, sample_volume.shape[1], *grid_size.tolist()]),
++                grid=((mapped_pos - aabb[0]) / voxel_size).reshape(1, -1, 3),
++                mode='trilinear',
++            ).reshape(-1, sample_volume.shape[1])
++            flat_attrs[active] = sampled[:, :-1]
++            sample_valid.reshape(-1)[active] = sampled[:, -1] > 0
++        del sample_volume, sample_coords, flat_pos, pos
+         
+         # --- Texture Post-Processing & Material Construction ---
+         print("Finalizing mesh...")
+@@ -2042,15 +2119,12 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
+         # Inpainting: fill gaps (dilation) to prevent black seams at UV boundaries
+         mask_inv = (~mask).astype(np.uint8)
+         
+-        # Also inpaint interior black patches caused by mesh surface points landing in
+-        # gaps between sparse texture voxels (grid_sample_3d returns zero at those spots).
+-        # Detect zero-valued pixels within the mesh boundary and add them to the inpaint mask.
+-        interior_black = (mask & (base_color.max(axis=-1) < 5)).astype(np.uint8)
+-        combined_mask = np.maximum(mask_inv, interior_black)
++        missing_samples = (mask & ~sample_valid.cpu().numpy()).astype(np.uint8)
++        combined_mask = np.maximum(mask_inv, missing_samples)
+         
+         print(f"[Trellis2 Bake] Inpainting: {mask_inv.sum()} boundary pixels + "
+-              f"{interior_black.sum()} interior black patches "
+-              f"({interior_black.sum() * 100 / max(mask.sum(), 1):.1f}% of mesh surface)")
++              f"{missing_samples.sum()} missing voxel samples "
++              f"({missing_samples.sum() * 100 / max(mask.sum(), 1):.1f}% of mesh surface)")
+         
+         base_color = cv2.inpaint(base_color, combined_mask, 3, cv2.INPAINT_TELEA)
+         metallic = cv2.inpaint(metallic, combined_mask, 3, cv2.INPAINT_TELEA)[..., None]
+@@ -2076,9 +2150,9 @@ class Trellis2_GGUFPostProcessAndUnWrapAndRasterizer:
+         uvs_np = out_uvs.cpu().numpy()
+         normals_np = out_normals.cpu().numpy()
+         
+-        # Swap Y and Z axes, invert Y (common conversion for GLB compatibility)
+-        vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2].copy(), -vertices_np[:, 1].copy()
+-        normals_np[:, 1], normals_np[:, 2] = normals_np[:, 2].copy(), -normals_np[:, 1].copy()
++        if coordinate_system == 'z_up':
++            vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2].copy(), -vertices_np[:, 1].copy()
++            normals_np[:, 1], normals_np[:, 2] = normals_np[:, 2].copy(), -normals_np[:, 1].copy()
+         uvs_np[:, 1] = 1 - uvs_np[:, 1] # Flip UV V-coordinate
+         
+         if use_custom_normals:
+@@ -2607,16 +2681,21 @@ class Trellis2_GGUFPreProcessImage:
+                 # self.rembg_model.cpu()
+         output = input
+         output_np = np.array(output)
+-        alpha = output_np[:, :, 3]
+-        bbox = np.argwhere(alpha > 0.8 * 255)
+-        bbox = np.min(bbox[:, 1]), np.min(bbox[:, 0]), np.max(bbox[:, 1]), np.max(bbox[:, 0])
+-        center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+-        size = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
+-        size = int(size * 1)
+-        bbox = center[0] - size // 2, center[1] - size // 2, center[0] + size // 2, center[1] + size // 2
+-        output = output.crop(bbox)  # type: ignore
+-        output = np.array(output).astype(np.float32) / 255
+-        output = output[:, :, :3] * output[:, :, 3:4]
++        if output_np.ndim == 3 and output_np.shape[2] >= 4:
++            alpha = output_np[:, :, 3]
++            bbox = np.argwhere(alpha > 0.8 * 255)
++            if bbox.size:
++                bbox = np.min(bbox[:, 1]), np.min(bbox[:, 0]), np.max(bbox[:, 1]), np.max(bbox[:, 0])
++                center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
++                size = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
++                size = int(size * 1)
++                bbox = center[0] - size // 2, center[1] - size // 2, center[0] + size // 2, center[1] + size // 2
++                output = output.crop(bbox)  # type: ignore
++            output = np.array(output).astype(np.float32) / 255
++            output = output[:, :, :3] * output[:, :, 3:4]
++        else:
++            output = output.convert('RGB')
++            output = np.array(output).astype(np.float32) / 255
+         output = Image.fromarray((output * 255).astype(np.uint8))
+         return output    
+ 
+@@ -4189,3 +4268,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
+     "Trellis2SimplifyTrimeshAdvanced_GGUF": "Trellis2 - Simplify Trimesh Advanced (GGUF)",
+     "Trellis2AutoRemesher_GGUF": "Trellis2 - AutoRemesher (Quad Remesh)",
+     }
++
+diff --git a/patch/flexible_dual_grid.py b/patch/flexible_dual_grid.py
+index fda97c5..ed6c468 100644
+--- a/patch/flexible_dual_grid.py
++++ b/patch/flexible_dual_grid.py
+@@ -45,25 +45,23 @@ def tiled_flexible_dual_grid_to_mesh(
+                     # exactly what the custom CUDA kernel expects.
+                     t_coords = coords[mask].contiguous()
+                     t_dual = dual_vertices[mask].contiguous()
+-                    t_inter = intersected_flag[mask].contiguous()
++                    # Halo cells supply neighbors; only core cells own intersections.
++                    t_inter = (intersected_flag[mask] & torch.all((t_coords >= lower) & (t_coords < upper), dim=1)[:, None]).contiguous()
+                     t_weight = split_weight[mask].contiguous()
+ 
+                     if not t_inter.any():
+                         pbar.update(1)
+                         continue
+ 
+-                    try:
+-                        t_verts, t_faces = flexible_dual_grid_to_mesh(
+-                            t_coords, t_dual, t_inter, t_weight,
+-                            aabb=aabb, grid_size=grid_size, train=train
+-                        )
+-
+-                        if t_verts is not None and t_verts.shape[0] > 0:
+-                            all_vertices.append(t_verts)
+-                            all_faces.append(t_faces + vertex_count)
+-                            vertex_count += t_verts.shape[0]
+-                    except RuntimeError:
+-                        continue
++                    t_verts, t_faces = flexible_dual_grid_to_mesh(
++                        t_coords, t_dual, t_inter, t_weight,
++                        aabb=aabb, grid_size=grid_size, train=train
++                    )
++
++                    if t_verts is not None and t_verts.shape[0] > 0:
++                        all_vertices.append(t_verts)
++                        all_faces.append(t_faces + vertex_count)
++                        vertex_count += t_verts.shape[0]
+ 
+                 pbar.update(1)
+ 
+diff --git a/trellis2_gguf/models/__init__.py b/trellis2_gguf/models/__init__.py
+index 2a74803..02a3513 100644
+--- a/trellis2_gguf/models/__init__.py
++++ b/trellis2_gguf/models/__init__.py
+@@ -321,6 +321,10 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
+     else:
+         sd = load_file(model_file)
+ 
++    # GGUF flow weights are assigned directly; avoid dense temporary storage.
++    meta_gguf = is_gguf and config['name'] in {
++        'SparseStructureFlowModel', 'SLatFlowModel', 'ElasticSLatFlowModel'
++    } and kwargs.get('pe_mode', config['args'].get('pe_mode')) == 'rope'
+     # Build model (skip random init for speed)
+     model_class = __getattr__(config['name'])
+     _orig_init_weights = getattr(model_class, 'initialize_weights', None)
+@@ -340,40 +344,70 @@ def from_pretrained(path: str, enable_gguf: bool = False, gguf_quant: str = "Q8_
+         sig = inspect.signature(model_class.__init__)
+         has_var_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+         final_args = {k: v for k, v in merged_args.items() if has_var_kwargs or k in sig.parameters}
+-        model = model_class(**final_args)
++        if meta_gguf:
++            with torch.device('meta'):
++                model = model_class(**final_args)
++                model = gguf_utils.convert_to_ggml(model)
++            # Shared modulation originally draws small CPU tensors in each block.
++            # Preserve that generator advance: SS/texture noise uses the CPU RNG.
++            if getattr(model, 'share_mod', False):
++                for block in model.blocks:
++                    torch.randn(block.modulation.shape, device='cpu', dtype=torch.get_default_dtype())
++        else:
++            model = model_class(**final_args)
+     finally:
+         for name, fn in _orig_inits.items():
+             setattr(init, name, fn)
+         if _orig_init_weights:
+             model_class.initialize_weights = _orig_init_weights
+ 
+-    if is_gguf:
++    if is_gguf and not meta_gguf:
+         model = gguf_utils.convert_to_ggml(model)
+ 
+-    model.load_state_dict(sd, strict=False)
++    missing_parameters = sorted(set(dict(model.named_parameters())) - set(sd))
++    if missing_parameters:
++        raise RuntimeError(
++            f"Checkpoint {os.path.basename(model_file)} does not match {config['name']}: "
++            f"{len(missing_parameters)} required parameters are missing "
++            f"({', '.join(missing_parameters[:5])}). "
++            "Install weights for the selected model; renaming a different checkpoint is not sufficient."
++        )
++    if meta_gguf:
++        # Match the former copy_ destination dtype for unquantized tensors.
++        # Own their writable storage; quantized tensors retain the GGML loader.
++        placeholders = dict(model.named_parameters()) | dict(model.named_buffers())
++        for key, value in sd.items():
++            if key in placeholders and getattr(value, 'tensor_type', None) in {None, 0, 1}:
++                plain = value.as_subclass(torch.Tensor) if type(value) is not torch.Tensor else value
++                owner = model.get_submodule(key.rsplit('.', 1)[0]) if '.' in key else model
++                # Native GGUF Linear assigns checkpoint bias/weight dtype directly.
++                native_linear = isinstance(owner, gguf_utils.GGMLOps.Linear) and gguf_utils.GGMLOps.Linear.__module__.startswith('gguf_native.')
++                dtype = value.dtype if native_linear else placeholders[key].dtype
++                sd[key] = plain.to(dtype=dtype, copy=True)
++        model.load_state_dict(sd, strict=False, assign=True)
++    else:
++        model.load_state_dict(sd, strict=False)
+ 
+     if is_gguf and hasattr(model, "rope_phases") and model.rope_phases is not None:
+         try:
+             from ..modules.attention.rope import RotaryPositionEmbedder
+             logger.info("Regenerating rope_phases for GGUF model to restore complex float32 positional embeddings...")
+             pos_embedder = RotaryPositionEmbedder(model.model_channels // model.num_heads, 3)
+-            coords = torch.meshgrid(*[torch.arange(res, device=model.rope_phases.device) for res in [model.resolution] * 3], indexing='ij')
++            rope_device = next(model.parameters()).device if meta_gguf else model.rope_phases.device
++            coords = torch.meshgrid(*[torch.arange(res, device=rope_device) for res in [model.resolution] * 3], indexing='ij')
+             coords = torch.stack(coords, dim=-1).reshape(-1, 3)
+             rope_phases = pos_embedder(coords)
+-            model.rope_phases.copy_(rope_phases)
++            if meta_gguf:
++                model.rope_phases = rope_phases
++            else:
++                model.rope_phases.copy_(rope_phases)
+         except Exception as e:
+             logger.warning("Failed to regenerate rope_phases: %s", e)
+ 
+-    if not is_gguf:
+-        # Reload directly to CUDA for FP16 models (avoids CPU overhead)
+-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+-        try:
+-            sd_loaded = load_file(model_file, device=device)
+-            model.load_state_dict(sd_loaded, strict=False)
+-        except Exception as e:
+-            logger.warning("Direct CUDA load failed (%s), using CPU fallback", e)
+-            model.load_state_dict(load_file(model_file), strict=False)
+-
++    if meta_gguf:
++        unmaterialized = [name for name, value in list(model.named_parameters()) + list(model.named_buffers()) if value.is_meta]
++        if unmaterialized:
++            raise RuntimeError(f"GGUF checkpoint left tensors unmaterialized: {', '.join(unmaterialized[:5])}")
+     return model
+ 
+ 
+diff --git a/trellis2_gguf/models/sc_vaes/sparse_unet_vae.py b/trellis2_gguf/models/sc_vaes/sparse_unet_vae.py
+index e37a3ea..37b914a 100644
+--- a/trellis2_gguf/models/sc_vaes/sparse_unet_vae.py
++++ b/trellis2_gguf/models/sc_vaes/sparse_unet_vae.py
+@@ -117,6 +117,10 @@ class SparseResBlock3d(nn.Module):
+         else:
+             h = h.replace(self.norm2(h.feats))
+             h = h.replace(F.silu(h.feats))
++        if self.low_vram and torch.cuda.is_available():
++            # conv2 allocates its complete sparse output in one block. Return
++            # cached temporaries first so 6 GB GPUs can satisfy that block.
++            torch.cuda.empty_cache()
+         h = self.conv2(h)
+         if self.low_vram:
+             skip = self.skip_connection(x)
+@@ -282,6 +286,8 @@ class SparseResBlockS2C3d(nn.Module):
+         else:
+             h = x.replace(self.norm1(x.feats))
+             h = h.replace(F.silu(h.feats))
++        if self.low_vram and torch.cuda.is_available():
++            torch.cuda.empty_cache()
+         h = self.conv1(h)
+         h = self.updown(h)
+         x = self.updown(x)
+@@ -342,6 +348,8 @@ class SparseResBlockC2S3d(nn.Module):
+         else:
+             h = x.replace(self.norm1(x.feats))
+             h = h.replace(F.silu(h.feats))
++        if self.low_vram and torch.cuda.is_available():
++            torch.cuda.empty_cache()
+         h = self.conv1(h)
+         subdiv_binarized = subdiv.replace(subdiv.feats > 0) if subdiv is not None else None
+         h = self.updown(h, subdiv_binarized)
+@@ -352,6 +360,8 @@ class SparseResBlockC2S3d(nn.Module):
+         else:
+             h = h.replace(self.norm2(h.feats))
+             h = h.replace(F.silu(h.feats))
++        if self.low_vram and torch.cuda.is_available():
++            torch.cuda.empty_cache()
+         h = self.conv2(h)
+         if self.low_vram:
+             skip = self.skip_connection(x)
+@@ -717,4 +727,3 @@ class SparseUnetVaeDecoder(nn.Module):
+                     h, sub = block(h)
+                 else:
+                     h = block(h)
+-       
+\ No newline at end of file
+diff --git a/trellis2_gguf/modules/attention/rope.py b/trellis2_gguf/modules/attention/rope.py
+index 1cf6c5b..d4c3154 100644
+--- a/trellis2_gguf/modules/attention/rope.py
++++ b/trellis2_gguf/modules/attention/rope.py
+@@ -20,7 +20,11 @@ class RotaryPositionEmbedder(nn.Module):
+         self.freqs = rope_freq[0] / (rope_freq[1] ** (self.freqs))
+         
+     def _get_phases(self, indices: torch.Tensor) -> torch.Tensor:
+-        self.freqs = self.freqs.to(indices.device)
++        if self.freqs.device.type == "meta":
++            freqs = torch.arange(self.freq_dim, dtype=torch.float32, device=indices.device) / self.freq_dim
++            self.freqs = self.rope_freq[0] / (self.rope_freq[1] ** freqs)
++        else:
++            self.freqs = self.freqs.to(indices.device)
+         phases = torch.outer(indices, self.freqs)
+         phases = torch.polar(torch.ones_like(phases), phases)
+         return phases
+@@ -45,4 +49,4 @@ class RotaryPositionEmbedder(nn.Module):
+                     torch.ones(*phases.shape[:-1], padn, device=phases.device),
+                     torch.zeros(*phases.shape[:-1], padn, device=phases.device)
+                 )], dim=-1)
+-        return phases
+\ No newline at end of file
++        return phases
+diff --git a/trellis2_gguf/modules/sparse/attention/proj_attention.py b/trellis2_gguf/modules/sparse/attention/proj_attention.py
+index d194f3a..a207b95 100644
+--- a/trellis2_gguf/modules/sparse/attention/proj_attention.py
++++ b/trellis2_gguf/modules/sparse/attention/proj_attention.py
+@@ -51,9 +51,17 @@ class SparseProjectAttention(nn.Module):
+             proj_max = int(proj_coords_key.max().item()) + 1
+             proj_flat = proj_coords_key[:, 0] * proj_max * proj_max + proj_coords_key[:, 1] * proj_max + proj_coords_key[:, 2]
+             x_flat = x_coords_key[:, 0] * proj_max * proj_max + x_coords_key[:, 1] * proj_max + x_coords_key[:, 2]
+-            proj_lookup = torch.zeros(int(proj_max**3), proj_feats_dev.shape[1], device=device, dtype=proj_feats_dev.dtype)
+-            proj_lookup[proj_flat] = proj_feats_dev
+-            aligned_feats = proj_lookup[x_flat]
++
++            # A full R^3 lookup table can require >1 GB at 1024. Sort the
++            # projected keys and search only the sparse coordinates instead.
++            order = torch.argsort(proj_flat)
++            proj_flat_sorted = proj_flat[order]
++            proj_feats_sorted = proj_feats_dev[order]
++            match_idx = torch.searchsorted(proj_flat_sorted, x_flat)
++            match_idx = match_idx.clamp(max=proj_flat_sorted.numel() - 1)
++            matched = proj_flat_sorted[match_idx] == x_flat
++            aligned_feats = proj_feats_dev.new_zeros((x_flat.numel(), proj_feats_dev.shape[1]))
++            aligned_feats[matched] = proj_feats_sorted[match_idx[matched]]
+             proj_feats = self.proj_linear(aligned_feats)
+             combined_feats = proj_feats + global_out.feats
+         else:
+diff --git a/trellis2_gguf/modules/sparse/attention/rope.py b/trellis2_gguf/modules/sparse/attention/rope.py
+index fb87729..dca48bc 100644
+--- a/trellis2_gguf/modules/sparse/attention/rope.py
++++ b/trellis2_gguf/modules/sparse/attention/rope.py
+@@ -21,7 +21,11 @@ class SparseRotaryPositionEmbedder(nn.Module):
+         self.freqs = rope_freq[0] / (rope_freq[1] ** (self.freqs))
+         
+     def _get_phases(self, indices: torch.Tensor) -> torch.Tensor:
+-        self.freqs = self.freqs.to(indices.device)
++        if self.freqs.device.type == "meta":
++            freqs = torch.arange(self.freq_dim, dtype=torch.float32, device=indices.device) / self.freq_dim
++            self.freqs = self.rope_freq[0] / (self.rope_freq[1] ** freqs)
++        else:
++            self.freqs = self.freqs.to(indices.device)
+         phases = torch.outer(indices, self.freqs)
+         phases = torch.polar(torch.ones_like(phases), phases)
+         return phases
+@@ -55,4 +59,4 @@ class SparseRotaryPositionEmbedder(nn.Module):
+         if k is None:
+             return q_embed
+         k_embed = k.replace(self._rotary_embedding(k.feats, phases))
+-        return q_embed, k_embed
+\ No newline at end of file
++        return q_embed, k_embed
+diff --git a/trellis2_gguf/modules/sparse/nonlinearity.py b/trellis2_gguf/modules/sparse/nonlinearity.py
+index 950e5c0..3fc1acf 100644
+--- a/trellis2_gguf/modules/sparse/nonlinearity.py
++++ b/trellis2_gguf/modules/sparse/nonlinearity.py
+@@ -22,6 +22,17 @@ class SparseSiLU(nn.SiLU):
+ 
+ class SparseGELU(nn.GELU):
+     def forward(self, input: VarLenTensor) -> VarLenTensor:
++        feats = input.feats
++        if not torch.is_grad_enabled() and feats.numel() * feats.element_size() > 32 * 1024 * 1024:
++            # This is the disposable expansion buffer between the two MLP
++            # linears. Reuse it during inference so GELU does not allocate a
++            # second full-size tensor (hundreds of MB for 1024 texture SLats).
++            bytes_per_row = max(1, feats.shape[-1] * feats.element_size())
++            rows_per_chunk = max(1, (16 * 1024 * 1024) // bytes_per_row)
++            for start in range(0, feats.shape[0], rows_per_chunk):
++                end = min(start + rows_per_chunk, feats.shape[0])
++                feats[start:end].copy_(super().forward(feats[start:end]))
++            return input
+         return input.replace(super().forward(input.feats))
+ 
+ 
+diff --git a/trellis2_gguf/modules/transformer/blocks.py b/trellis2_gguf/modules/transformer/blocks.py
+index fb6f5eb..3a35b63 100644
+--- a/trellis2_gguf/modules/transformer/blocks.py
++++ b/trellis2_gguf/modules/transformer/blocks.py
+@@ -27,7 +27,11 @@ class AbsolutePositionEmbedder(nn.Module):
+         Returns:
+             an (N, D) Tensor of positional embeddings.
+         """
+-        self.freqs = self.freqs.to(x.device)
++        if self.freqs.device.type == "meta":
++            freqs = torch.arange(self.freq_dim, dtype=torch.float32, device=x.device) / self.freq_dim
++            self.freqs = 1.0 / (10000 ** freqs)
++        else:
++            self.freqs = self.freqs.to(x.device)
+         out = torch.outer(x, self.freqs)
+         out = torch.cat([torch.sin(out), torch.cos(out)], dim=-1)
+         return out
+@@ -183,4 +187,4 @@ class TransformerCrossBlock(nn.Module):
+             return torch.utils.checkpoint.checkpoint(self._forward, x, context, phases, use_reentrant=False)
+         else:
+             return self._forward(x, context, phases)
+-        
+\ No newline at end of file
++        
+diff --git a/trellis2_gguf/pipelines/trellis2_image_to_3d.py b/trellis2_gguf/pipelines/trellis2_image_to_3d.py
+index 2f0c202..76b8441 100644
+--- a/trellis2_gguf/pipelines/trellis2_image_to_3d.py
++++ b/trellis2_gguf/pipelines/trellis2_image_to_3d.py
+@@ -23,9 +23,17 @@ import flex_gemm
+ from flex_gemm.ops.grid_sample import grid_sample_3d
+ 
+ import random
++from ..utils.host_buffers import copy_features_to_cpu, cat_features_on_cpu
+ 
+ from comfy.utils import ProgressBar
+ 
++def build_pixal3d_image_cond_model(config: dict):
++    from ..trainers.flow_matching.mixins.image_conditioned_proj import DinoV3ProjFeatureExtractor
++    model = DinoV3ProjFeatureExtractor(**config)
++    model.eval()
++    return model
++
++
+ def pil2tensor(image):
+     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0)[None,]
+ 
+@@ -407,17 +415,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         return camera_config
+ 
+     def _get_build_pixal3d_image_cond_model(self):
+-        import sys
+-        for name, module in list(sys.modules.items()):
+-            if name.startswith('torch.') or name.startswith('torchvision.'): continue
+-            try:
+-                if hasattr(module, 'build_pixal3d_image_cond_model'):
+-                    func = getattr(module, 'build_pixal3d_image_cond_model')
+-                    if callable(func):
+-                        return func
+-            except Exception:
+-                pass
+-        raise ImportError("Could not find build_pixal3d_image_cond_model in loaded modules. Make sure ComfyUI-Trellis2 is updated and installed.")
++        return build_pixal3d_image_cond_model
+ 
+     def get_proj_cond_ss(
+         self,
+@@ -478,6 +476,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         distance: float = 2.0,
+         mesh_scale: float = 1.0,
+         grid_resolution_override: int = None,
++        fixed_mesh_projection: bool = False,
+     ) -> dict:
+         """
+         Get proj conditioning for shape/texture stages (sparse-token aligned).
+@@ -496,17 +495,38 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         """
+         print('Getting Projected Image Cond ...')
+         device = self.device
+-        # Use MoGe to estimate camera params from the image when available
+-        try:
+-            self.load_moge_model()
+-            cfg = self.get_moge_camera_config(image[0] if isinstance(image, list) else image)
+-            camera_angle_x = cfg['camera_angle_x']
+-            distance = cfg['distance']
+-            mesh_scale = cfg['mesh_scale']
+-            if self.low_vram:
+-                self.unload_moge_model()
+-        except Exception as e:
+-            print(f"[MoGe] Falling back to defaults: {e}")
++        reference = image[0] if isinstance(image, list) and image else image
++        foreground = reference.getchannel('A').getbbox() if isinstance(reference, Image.Image) and 'A' in reference.getbands() else None
++        if fixed_mesh_projection and foreground:
++            left, top, right, bottom = foreground
++            target_extent = np.array([(right - left) / reference.width, (bottom - top) / reference.height])
++            grid_res = grid_resolution_override or image_cond_model.grid_resolution
++            points = coords[:, 1:].detach().cpu().numpy() / (grid_res - 1) - 0.5
++            focal = 0.5 / np.tan(camera_angle_x / 2)
++            near = max(0.01, points[:, 2].max() / mesh_scale + 0.01)
++            far = max(distance, near + 1)
++            while np.max(np.ptp(focal * points[:, [0, 1]] / (far * mesh_scale - points[:, 2:3]), axis=0) / target_extent) > 1:
++                far *= 2
++            for _ in range(32):
++                candidate = (near + far) / 2
++                projected = focal * points[:, [0, 1]] / (candidate * mesh_scale - points[:, 2:3])
++                if np.max(np.ptp(projected, axis=0) / target_extent) > 1:
++                    near = candidate
++                else:
++                    far = candidate
++            distance = far
++            print(f'[Trellis2] Fixed-mesh reference framing: distance={distance:.5f}, foreground={target_extent.tolist()}')
++        else:
++            try:
++                self.load_moge_model()
++                cfg = self.get_moge_camera_config(reference)
++                camera_angle_x = cfg['camera_angle_x']
++                distance = cfg['distance']
++                mesh_scale = cfg['mesh_scale']
++                if self.low_vram:
++                    self.unload_moge_model()
++            except Exception as e:
++                print(f"[MoGe] Falling back to defaults: {e}")
+         target_size = getattr(image_cond_model, 'naf_target_size', 512)
+         is_texture_stage = False
+         if isinstance(target_size, (list, tuple)):
+@@ -514,38 +534,30 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         else:
+             is_texture_stage = target_size == 1024
+ 
+-        if self.low_vram and not is_texture_stage:
++        if self.low_vram:
+             image_cond_model.to(device)
+-            image_cond_model.naf_tile_factor = 4
+-        else:
+-            if self.low_vram:
+-                image_cond_model.to(device)
+-            image_cond_model.naf_tile_factor = 1
++            # Stream NAF features for both shape and 1024 texture stages.
++            # The full-resolution texture path exceeds 6 GB VRAM.
++            image_cond_model.naf_tile_factor = int(os.environ.get('TRELLIS2_NAF_TILE_FACTOR', '4'))
+ 
+         orig_grid_res = image_cond_model.grid_resolution
+-        if grid_resolution_override is not None and grid_resolution_override != orig_grid_res:
+-            image_cond_model.grid_resolution = grid_resolution_override
+-            image_cond_model.proj_grid = image_cond_model.proj_grid.__class__(
+-                grid_resolution=grid_resolution_override,
+-                image_resolution=image_cond_model.proj_grid.image_resolution,
+-            ).to(device)
+-
+-        B = 1
+-        cam_angle = torch.tensor([camera_angle_x], device=device)
+-        dist_tensor = torch.tensor([distance], device=device)
+-        scale_tensor = torch.tensor([mesh_scale], device=device)
+-        # monkeypatch the forward of this specific image_cond_model instance
+-        # or its class if it hasn't been monkeypatched yet!
+-        if not hasattr(image_cond_model, '_monkeypatched_for_cpu'):
+-            original_forward = image_cond_model.forward.__func__ if hasattr(image_cond_model.forward, '__func__') else image_cond_model.forward
+-            
+-            def optimized_forward_instance(self_instance, image, camera_angle_x=None, distance=None, mesh_scale=None, transform_matrix=None):
+-                if self_instance.grid_resolution < 32:
+-                    return original_forward(self_instance, image, camera_angle_x, distance, mesh_scale, transform_matrix)
++        orig_proj_grid = image_cond_model.proj_grid
++        try:
++            if grid_resolution_override is not None and grid_resolution_override != orig_grid_res:
++                image_cond_model.grid_resolution = grid_resolution_override
++                image_cond_model.proj_grid = image_cond_model.proj_grid.__class__(
++                    grid_resolution=grid_resolution_override,
++                    image_resolution=image_cond_model.proj_grid.image_resolution,
++                ).to(device)
++
++            B = 1
++            cam_angle = torch.tensor([camera_angle_x], device=device)
++            dist_tensor = torch.tensor([distance], device=device)
++            scale_tensor = torch.tensor([mesh_scale], device=device)
++            grid_res = image_cond_model.grid_resolution
++            sparse_indices = tuple(coords[:, axis].long().to(device) for axis in range(4))
++            def project_sparse_features(self_instance, image, camera_angle_x=None, distance=None, mesh_scale=None, transform_matrix=None):
+                 
+-                import torch
+-                import numpy as np
+-                from PIL import Image
+ 
+                 if isinstance(image, torch.Tensor):
+                     assert image.ndim == 4, "Image tensor should be batched (B, C, H, W)"
+@@ -588,8 +600,16 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                         transform_matrix
+                     )
+                     
++                    z_proj_lr = z_proj_lr.reshape(B, grid_res, grid_res, grid_res, -1)[sparse_indices]
++
+                     if self_instance.use_naf_upsample:
+                         self_instance._load_naf()
++                        # DINO features are complete; its weights must not overlap NAF encoding.
++                        # Load NAF first while DINO still identifies the correct CUDA device.
++                        if self.low_vram:
++                            self_instance.model.cpu()
++                            self._cleanup_cuda()
++                            print('[Pixal3D] DINO offloaded before NAF encoding', flush=True)
+                         lr_features_bchw = z_patchtokens_spatial.permute(0, 3, 1, 2)
+ 
+                         K = getattr(self_instance, 'naf_tile_factor', 1) or 1
+@@ -613,11 +633,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                                 tile_factor=int(K),
+                             )
+ 
+-                        z_proj_lr_cpu = z_proj_lr.cpu()
+-                        z_proj_hr_cpu = z_proj_hr.cpu()
++                        z_proj_hr = z_proj_hr.reshape(B, grid_res, grid_res, grid_res, -1)[sparse_indices]
++                        z_proj_lr_cpu = copy_features_to_cpu(z_proj_lr)
++                        z_proj_hr_cpu = copy_features_to_cpu(z_proj_hr)
+                         del z_proj_lr, z_proj_hr
+                         torch.cuda.empty_cache()
+-                        z_proj = torch.cat([z_proj_lr_cpu, z_proj_hr_cpu], dim=-1)
++                        z_proj = cat_features_on_cpu([z_proj_lr_cpu, z_proj_hr_cpu], dim=-1)
+                     else:
+                         z_proj = z_proj_lr.cpu()
+                         del z_proj_lr
+@@ -626,39 +647,33 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                     global_features = torch.cat([z_clstoken, z_regtokens], dim=1)
+                     return global_features, z_proj
+ 
+-            import types
+-            image_cond_model.forward = types.MethodType(optimized_forward_instance, image_cond_model)
+-            image_cond_model._monkeypatched_for_cpu = True
+-            print("[Trellis2-GGUF] Successfully applied instance monkeypatch to image_cond_model!")
+ 
+-        with hide_src_module():
+-            z_global, z_proj = image_cond_model(
+-                image, camera_angle_x=cam_angle, distance=dist_tensor, mesh_scale=scale_tensor,
+-            )
+-        grid_res = image_cond_model.grid_resolution
+-        z_proj_grid = z_proj.reshape(B, grid_res, grid_res, grid_res, -1)
+-        batch_indices = coords[:, 0].long().to(z_proj.device)
+-        x_coords = coords[:, 1].long().to(z_proj.device)
+-        y_coords = coords[:, 2].long().to(z_proj.device)
+-        z_coords = coords[:, 3].long().to(z_proj.device)
+-        z_proj_sparse = z_proj_grid[batch_indices, x_coords, y_coords, z_coords].to(device)
+-        z_proj_st = SparseTensor(feats=z_proj_sparse, coords=coords)
+-        del z_proj_grid, z_proj
+-        torch.cuda.empty_cache()
++            with hide_src_module():
++                if grid_res >= 32:
++                    z_global, z_proj_sparse = project_sparse_features(
++                        image_cond_model, image, camera_angle_x=cam_angle,
++                        distance=dist_tensor, mesh_scale=scale_tensor,
++                    )
++                    z_proj_sparse = z_proj_sparse.to(device)
++                else:
++                    z_global, z_proj = image_cond_model(
++                        image, camera_angle_x=cam_angle, distance=dist_tensor, mesh_scale=scale_tensor,
++                    )
++                    indices = tuple(index.to(z_proj.device) for index in sparse_indices)
++                    z_proj_sparse = z_proj.reshape(B, grid_res, grid_res, grid_res, -1)[indices].to(device)
++                    del z_proj
++            z_proj_st = SparseTensor(feats=z_proj_sparse, coords=coords)
++            torch.cuda.empty_cache()
+ 
+-        if grid_resolution_override is not None and grid_resolution_override != orig_grid_res:
++            return {
++                'cond': {'global': z_global, 'proj': z_proj_st},
++                'neg_cond': {'global': torch.zeros_like(z_global), 'proj': SparseTensor(feats=torch.zeros_like(z_proj_sparse), coords=coords)},
++            }
++        finally:
+             image_cond_model.grid_resolution = orig_grid_res
+-            image_cond_model.proj_grid = image_cond_model.proj_grid.__class__(
+-                grid_resolution=orig_grid_res,
+-                image_resolution=image_cond_model.proj_grid.image_resolution,
+-            ).to(device)
+-
+-        if self.low_vram:
+-            image_cond_model.cpu()
+-        return {
+-            'cond': {'global': z_global, 'proj': z_proj_st},
+-            'neg_cond': {'global': torch.zeros_like(z_global), 'proj': SparseTensor(feats=torch.zeros_like(z_proj_sparse), coords=coords)},
+-        }
++            image_cond_model.proj_grid = orig_proj_grid
++            if self.low_vram:
++                image_cond_model.cpu()
+ 
+     def load_pixal3d_image_cond_ss(self):    
+         if hasattr(self,'pixal3d_image_cond_ss') and self.pixal3d_image_cond_ss is not None:
+@@ -880,10 +895,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         if self.models['tex_slat_flow_model_1024'] is None:
+             print('Loading Texture Slat Flow 1024 model ...')
+             _path = self._sdnq_remap(os.path.join(self.path, self._pretrained_args['models']['tex_slat_flow_model_1024']))
++            texture_quant = getattr(self, 'gguf_quant', 'Q8_0')
++            if texture_quant != getattr(self, 'gguf_quant', texture_quant):
++                print(f'[Trellis2] Using {texture_quant} for Pixal3D texture flow; geometry remains {self.gguf_quant}.')
+             self.models['tex_slat_flow_model_1024'] = models.from_pretrained(
+                 _path,
+                 enable_gguf=getattr(self, 'enable_gguf', False),
+-                gguf_quant=getattr(self, 'gguf_quant', 'Q8_0'),
++                gguf_quant=texture_quant,
+                 precision=getattr(self, 'precision', None),
+                 enable_sdnq=getattr(self, 'enable_sdnq', False),
+                 sdnq_use_quantized_matmul=getattr(self, 'sdnq_use_quantized_matmul', True),
+@@ -1152,6 +1170,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         dino_foundation_cap: float = 0.92,
+         proj_image_cond_model=None,
+         proj_images=None,
++        proj_grid_resolution: int = None,
+         **kwargs,
+     ) -> SparseTensor:
+         """
+@@ -1168,7 +1187,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         coords_dev = coords.to(self.device)
+         # Rebuild proj cond with coords if proj model is provided
+         if proj_image_cond_model is not None and proj_images is not None:
+-            grid_res = int(coords[:, 1:].max().item()) + 1
++            grid_res = proj_grid_resolution if proj_grid_resolution is not None else proj_image_cond_model.grid_resolution
+             cond = self.get_proj_cond_shape(proj_image_cond_model, proj_images, coords,
+                                             grid_resolution_override=grid_res)
+         # Sample structured latent
+@@ -1258,15 +1277,23 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+             tqdm_desc="Sampling shape SLat (LR)",
+         ).samples
+         if self.low_vram:
+-            flow_model_lr.cpu()
++            # Release completed LR owners before HR conditioning.
++            if (not self.keep_models_loaded and flow_model_lr is not flow_model
++                    and self.models.get('shape_slat_flow_model_512') is flow_model_lr):
++                flow_model_lr = None
++                self.unload_shape_slat_flow_model_512()
++            else:
++                flow_model_lr.cpu()
+             self._cleanup_cuda()                                
+         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
+         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
+         slat = slat * std + mean
+         
+         del coords_dev
++        # LR conditioning has no consumers after LR sampling; do not copy it to CPU.
++        lr_cond = None
++        del noise
+         if self.low_vram:
+-            lr_cond = self._cond_cpu(lr_cond)
+             self._cleanup_cuda()
+ 
+         # Upsample       
+@@ -1278,6 +1305,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         if self.low_vram:
+             self.models['shape_slat_decoder'].cpu()
+             self.models['shape_slat_decoder'].low_vram = False
++        del slat
+         hr_resolution = resolution
+         
+         if not self.keep_models_loaded:
+@@ -1309,7 +1337,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+             self._cleanup_cuda()
+         # Rebuild proj cond with HR coords if proj model is provided
+         if proj_image_cond_model is not None and proj_images is not None:
+-            hr_grid_res = int(coords[:, 1:].max().item()) + 1
++            hr_grid_res = hr_resolution // 16
++            cond = None
++            self._cleanup_cuda()
+             cond = self.get_proj_cond_shape(proj_image_cond_model, proj_images, coords,
+                                             grid_resolution_override=hr_grid_res)
+             if self.low_vram:
+@@ -1395,6 +1425,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         dino_foundation_cap: float = 0.92,
+         proj_image_cond_model=None,
+         proj_images=None,
++        fixed_mesh_projection: bool = False,
++        proj_grid_resolution: int = None,
+         **kwargs,
+     ) -> SparseTensor:
+         """
+@@ -1410,10 +1442,19 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         # Rebuild proj cond with shape_slat coords if proj model provided
+         if proj_image_cond_model is not None and proj_images is not None:
+             tex_coords = shape_slat.coords.cpu()
+-            tex_grid_res = int(tex_coords[:, 1:].max().item()) + 1
++            tex_grid_res = proj_grid_resolution if proj_grid_resolution is not None else proj_image_cond_model.grid_resolution
+             cond = self.get_proj_cond_shape(proj_image_cond_model, proj_images, tex_coords,
+-                                            grid_resolution_override=tex_grid_res)
++                                            grid_resolution_override=tex_grid_res,
++                                            fixed_mesh_projection=fixed_mesh_projection)
+         # Sample structured latent
++        try:
++            _cg=cond.get('cond', {}) if isinstance(cond, dict) else {}
++            print(f'[Trellis2 DEBUG] tex cond keys={list(_cg.keys())} shape_slat={tuple(shape_slat.feats.shape)} device={shape_slat.feats.device}')
++            for _k,_v in _cg.items():
++                _f=getattr(_v, 'feats', _v)
++                print(f'[Trellis2 DEBUG] tex cond {_k}: shape={tuple(_f.shape)} min={float(_f.min()):.5g} max={float(_f.max()):.5g} mean={float(_f.float().mean()):.5g}')
++        except Exception as _e:
++            print(f'[Trellis2 DEBUG] tex cond stats failed: {_e}')
+         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(shape_slat.device)
+         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(shape_slat.device)
+         shape_slat = (shape_slat - mean) / std
+@@ -1438,9 +1479,17 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+             flow_model.cpu()
+             self._cleanup_cuda()                    
+ 
++        try:
++            print(f'[Trellis2 DEBUG] tex sampled normalized: shape={tuple(slat.feats.shape)} min={float(slat.feats.min()):.5g} max={float(slat.feats.max()):.5g} mean={float(slat.feats.float().mean()):.5g} std={float(slat.feats.float().std()):.5g}')
++        except Exception as _e:
++            print(f'[Trellis2 DEBUG] tex sampled stats failed: {_e}')
+         std = torch.tensor(self.tex_slat_normalization['std'])[None].to(slat.device)
+         mean = torch.tensor(self.tex_slat_normalization['mean'])[None].to(slat.device)
+         slat = slat * std + mean
++        try:
++            print(f'[Trellis2 DEBUG] tex denorm: min={float(slat.feats.min()):.5g} max={float(slat.feats.max()):.5g} mean={float(slat.feats.float().mean()):.5g} std={float(slat.feats.float().std()):.5g}')
++        except Exception as _e:
++            print(f'[Trellis2 DEBUG] tex denorm stats failed: {_e}')
+         
+         if self.low_vram:
+             cond = self._cond_cpu(cond)
+@@ -1465,25 +1514,34 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         if self.low_vram:
+             self.models['tex_slat_decoder'].to(self.device)
+             self.models['tex_slat_decoder'].low_vram = True                                               
++
++        decoder = self.models['tex_slat_decoder']
++        use_tiled_decoder = bool(getattr(self, 'use_tiled_decoder_for_texture', False)) and hasattr(decoder, '_tiled_forward')
++        if getattr(self, 'use_tiled_decoder_for_texture', False) and not use_tiled_decoder:
++            print('[Trellis2] Texture decoder has no _tiled_forward; using standard decoder.')
+             
+         if subs is None:
+-            if getattr(self, 'use_tiled_decoder_for_texture', False):
++            if use_tiled_decoder:
+                 tile_overlap = getattr(self, 'tiled_decoder_overlap', 48)
+                 tile_size = getattr(self, 'tiled_decoder_size', 120)
+-                ret = self.models['tex_slat_decoder']._tiled_forward(slat, tile_size=tile_size, overlap=tile_overlap) * 0.5 + 0.5
++                ret = decoder._tiled_forward(slat, tile_size=tile_size, overlap=tile_overlap) * 0.5 + 0.5
+             else:
+-                ret = self.models['tex_slat_decoder'](slat) * 0.5 + 0.5
++                ret = decoder(slat) * 0.5 + 0.5
+         else:
+             slat.clear_spatial_cache()
+-            if getattr(self, 'use_tiled_decoder_for_texture', False):
++            if use_tiled_decoder:
+                 tile_overlap = getattr(self, 'tiled_decoder_overlap', 48)
+                 tile_size = getattr(self, 'tiled_decoder_size', 120)
+-                ret = self.models['tex_slat_decoder']._tiled_forward(slat, guide_subs=subs, tile_size=tile_size, overlap=tile_overlap) * 0.5 + 0.5
++                ret = decoder._tiled_forward(slat, guide_subs=subs, tile_size=tile_size, overlap=tile_overlap) * 0.5 + 0.5
+             else:
+-                ret = self.models['tex_slat_decoder'](slat, guide_subs=subs) * 0.5 + 0.5
++                ret = decoder(slat, guide_subs=subs) * 0.5 + 0.5
+             
++        try:
++            print(f'[Trellis2 DEBUG] tex decoder output: shape={tuple(ret.feats.shape)} min={float(ret.feats.min()):.5g} max={float(ret.feats.max()):.5g} mean={float(ret.feats.float().mean()):.5g} std={float(ret.feats.float().std()):.5g}')
++        except Exception as _e:
++            print(f'[Trellis2 DEBUG] tex decoder output stats failed: {_e}')
++
+         if self.low_vram:
+-            self.models['tex_slat_decoder'].cpu()
+             self.models['tex_slat_decoder'].low_vram = False
+             self._cleanup_cuda()
+         
+@@ -1538,7 +1596,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                         coords = None,
+                         attrs = None,
+                         voxel_shape = None,
+-                        layout=self.pbr_attr_layout
++                        layout=self.pbr_attr_layout,
++                        coordinate_system='y_up' if self.isPixal3D else 'z_up',
+                     )
+                 )
+             return out_mesh
+@@ -1557,7 +1616,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                         coords = v.coords[:, 1:],
+                         attrs = v.feats.float(),
+                         voxel_shape = torch.Size([*v.shape, *v.spatial_shape]),
+-                        layout=self.pbr_attr_layout
++                        layout=self.pbr_attr_layout,
++                        coordinate_system='y_up' if self.isPixal3D else 'z_up',
+                     )
+                 )
+             return out_mesh
+@@ -1628,6 +1688,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         # else:
+             # raise ValueError(f"Invalid pipeline type: {pipeline_type}")
+         
++        if pipeline_type == '512' and generate_texture_slat and 'tex_slat_flow_model_512' not in self._pretrained_args['models']:
++            raise ValueError("This model has no 512 texture checkpoint. Use 1024_cascade for textured generation, or disable generate_texture_slat for 512 geometry only.")
++
+         # Accept either a single PIL image or a list of PIL images (multi-view)
+         if isinstance(image, (list, tuple)):
+             images = list(image)
+@@ -1675,7 +1738,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+             pbar.update(1)
+         
+         if not self.keep_models_loaded:
++            ss_model = None
+             self.unload_sparse_structure_model()
++            if ss_attn_mode == 'proj':
++                proj_cond_model = None
++                self.unload_pixal3d_image_cond_ss()
+         
+         # Sampling Shape
+         # Build proj conds for shape/tex stages if needed (Pixal3D models require proj conditioning)
+@@ -1684,15 +1751,17 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         tex_1024_model = None
+         if ss_attn_mode == 'proj':
+             # coords are in sparse_structure_resolution space; proj grid must match
+-            coords_grid_res = int(coords[:, 1:].max().item()) + 1
++            coords_grid_res = sparse_structure_resolution
+             shape_512_model = self.load_pixal3d_image_cond_shape_512()
+             cond_512 = self.get_proj_cond_shape(shape_512_model, images, coords,
+                                                 grid_resolution_override=coords_grid_res)
+             if pipeline_type != '512':
++                if not self.keep_models_loaded:
++                    shape_512_model = None
++                    self.unload_pixal3d_image_cond_shape_512()
+                 shape_1024_model = self.load_pixal3d_image_cond_shape_1024()
+                 cond_1024 = self.get_proj_cond_shape(shape_1024_model, images, coords,
+                                                      grid_resolution_override=coords_grid_res)
+-                tex_1024_model = self.load_pixal3d_image_cond_tex_1024()
+ 
+         if pipeline_type == '512':            
+             self.unload_shape_slat_flow_model_1024()
+@@ -1703,6 +1772,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 sampler=shape_sampler or sampler,
+                 proj_image_cond_model=shape_512_model if ss_attn_mode == 'proj' else None,
+                 proj_images=images if ss_attn_mode == 'proj' else None,
++                proj_grid_resolution=sparse_structure_resolution,
+             )
+             
+             if pbar is not None:
+@@ -1720,6 +1790,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                     sampler=tex_sampler or sampler,
+                     proj_image_cond_model=shape_512_model if ss_attn_mode == 'proj' else None,
+                     proj_images=images if ss_attn_mode == 'proj' else None,
++                    proj_grid_resolution=sparse_structure_resolution,
+                 )
+                 
+                 if pbar is not None:
+@@ -1738,6 +1809,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 sampler=shape_sampler or sampler,
+                 proj_image_cond_model=shape_1024_model if ss_attn_mode == 'proj' else None,
+                 proj_images=images if ss_attn_mode == 'proj' else None,
++                proj_grid_resolution=sparse_structure_resolution,
+             )
+             
+             if pbar is not None:
+@@ -1747,6 +1819,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 self.unload_shape_slat_flow_model_1024()
+             
+             if generate_texture_slat:
++                if ss_attn_mode == 'proj':
++                    tex_1024_model = self.load_pixal3d_image_cond_tex_1024()
+                 self.unload_tex_slat_flow_model_512()
+                 self.load_tex_slat_flow_model_1024()
+                 tex_slat = self.sample_tex_slat(
+@@ -1754,6 +1828,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                     shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                     proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                     proj_images=images if ss_attn_mode == 'proj' else None,
++                    proj_grid_resolution=sparse_structure_resolution,
+                 )
+                 
+                 if pbar is not None:
+@@ -1764,10 +1839,14 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 
+             res = 1024
+         elif pipeline_type == '1024_cascade':
++            shape_conditions = [cond_512, cond_1024]
++            cond_512 = None
++            if ss_attn_mode == 'proj':
++                cond_1024 = {}  # Texture projection is rebuilt from the final shape.
+             self.load_shape_slat_flow_model_512()
+             self.load_shape_slat_flow_model_1024()            
+             shape_slat, res = self.sample_shape_slat_cascade(
+-                cond_512, cond_1024,
++                shape_conditions.pop(0), shape_conditions.pop(0),
+                 self.models['shape_slat_flow_model_512'], self.models['shape_slat_flow_model_1024'],
+                 512, 1024,
+                 coords, shape_slat_sampler_params,
+@@ -1788,9 +1867,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 self.unload_pixal3d_image_cond_ss()
+                 self.unload_pixal3d_image_cond_shape_512()
+                 self.unload_pixal3d_image_cond_shape_1024()
++                shape_512_model = shape_1024_model = proj_cond_model = None
+                 self._cleanup_cuda()
+ 
+             if generate_texture_slat:
++                if ss_attn_mode == 'proj':
++                    tex_1024_model = self.load_pixal3d_image_cond_tex_1024()
+                 self.unload_tex_slat_flow_model_512()
+                 self.load_tex_slat_flow_model_1024()
+                 tex_slat = self.sample_tex_slat(
+@@ -1798,6 +1880,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                     shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                     proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                     proj_images=images if ss_attn_mode == 'proj' else None,
++                    proj_grid_resolution=res // 16,
+                 )
+                 
+             if pbar is not None:
+@@ -1827,6 +1910,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 self.unload_shape_slat_flow_model_1024()
+                 
+             if generate_texture_slat:
++                if ss_attn_mode == 'proj':
++                    tex_1024_model = self.load_pixal3d_image_cond_tex_1024()
+                 self.unload_tex_slat_flow_model_512()
+                 self.load_tex_slat_flow_model_1024()
+                 tex_slat = self.sample_tex_slat(
+@@ -1834,6 +1919,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                     shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                     proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                     proj_images=images if ss_attn_mode == 'proj' else None,
++                    proj_grid_resolution=res // 16,
+                 )
+                 
+                 if pbar is not None:
+@@ -1863,6 +1949,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 self.unload_shape_slat_flow_model_1024()
+                 
+             if generate_texture_slat:
++                if ss_attn_mode == 'proj':
++                    tex_1024_model = self.load_pixal3d_image_cond_tex_1024()
+                 self.unload_tex_slat_flow_model_512()
+                 self.load_tex_slat_flow_model_1024()
+                 tex_slat = self.sample_tex_slat(
+@@ -1870,6 +1958,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                     shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                     proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                     proj_images=images if ss_attn_mode == 'proj' else None,
++                    proj_grid_resolution=res // 16,
+                 )
+                         
+                 if pbar is not None:
+@@ -1899,6 +1988,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 self.unload_shape_slat_flow_model_1024()
+             
+             if generate_texture_slat:            
++                if ss_attn_mode == 'proj':
++                    tex_1024_model = self.load_pixal3d_image_cond_tex_1024()
+                 self.unload_tex_slat_flow_model_512()
+                 self.load_tex_slat_flow_model_1024()
+                 tex_slat = self.sample_tex_slat(
+@@ -1906,6 +1997,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                     shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                     proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                     proj_images=images if ss_attn_mode == 'proj' else None,
++                    proj_grid_resolution=res // 16,
+                 )
+                 
+                 if pbar is not None:
+@@ -1920,6 +2012,11 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+             self.unload_pixal3d_image_cond_shape_512()
+             self.unload_pixal3d_image_cond_shape_1024()
+             self.unload_pixal3d_image_cond_tex_1024()
++        if not self.keep_models_loaded:
++            # Drop local owners before collecting unloaded conditioner models.
++            shape_512_model = shape_1024_model = tex_1024_model = proj_cond_model = None
++            cond_512 = cond_1024 = None
++            self._cleanup_cuda()
+         torch.cuda.empty_cache()
+         if generate_texture_slat:
+             out_mesh = self.decode_latent(shape_slat, tex_slat, res, use_tiled=use_tiled)
+@@ -2673,6 +2770,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         dino_foundation_cap: float = 0.92,
+         proj_image_cond_model=None,
+         proj_images=None,
++        proj_grid_resolution: int = None,
+         **kwargs,
+     ) -> SparseTensor:
+         """
+@@ -2688,7 +2786,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         # Rebuild proj cond with shape_slat coords if proj model provided
+         if proj_image_cond_model is not None and proj_images is not None:
+             tex_coords = shape_slat.coords.cpu()
+-            tex_grid_res = int(tex_coords[:, 1:].max().item()) + 1
++            tex_grid_res = proj_grid_resolution if proj_grid_resolution is not None else proj_image_cond_model.grid_resolution
+             cond = self.get_proj_cond_shape(proj_image_cond_model, proj_images, tex_coords,
+                                             grid_resolution_override=tex_grid_res)
+         # Sample structured latent
+@@ -2822,7 +2920,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 self.load_tex_slat_flow_model_1024()
+                 tex_slat = self.sample_tex_slat_advanced(
+                     cond_1024, self.models['tex_slat_flow_model_1024'],
+-                    shape_slat, tex_slat_sampler_params, tex_sampler
++                    shape_slat, tex_slat_sampler_params, tex_sampler,
++                    proj_grid_resolution=res // 16,
+                 )
+                 
+             if pbar is not None:
+@@ -2855,7 +2954,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 self.load_tex_slat_flow_model_1024()
+                 tex_slat = self.sample_tex_slat_advanced(
+                     cond_1024, self.models['tex_slat_flow_model_1024'],
+-                    shape_slat, tex_slat_sampler_params, tex_sampler
++                    shape_slat, tex_slat_sampler_params, tex_sampler,
++                    proj_grid_resolution=res // 16,
+                 )
+                 
+             if pbar is not None:
+@@ -2886,9 +2986,10 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         center = (vertices_min + vertices_max) / 2
+         scale = 0.99999 / (vertices_max - vertices_min).max()
+         vertices = (vertices - center) * scale
+-        tmp = vertices[:, 1].copy()
+-        vertices[:, 1] = -vertices[:, 2]
+-        vertices[:, 2] = tmp
++        if not self.isPixal3D:
++            tmp = vertices[:, 1].copy()
++            vertices[:, 1] = -vertices[:, 2]
++            vertices[:, 2] = tmp
+         assert np.all(vertices >= -0.5) and np.all(vertices <= 0.5), 'vertices out of range'
+         
+         mesh.vertices = vertices
+@@ -3145,9 +3246,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+             faces_np = out_faces.cpu().numpy()
+             normals_np = out_normals
+             
+-            # Swap Y and Z axes, invert Y (common conversion for GLB compatibility)
+-            vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2].copy(), -vertices_np[:, 1].copy()
+-            normals_np[:, 1], normals_np[:, 2] = normals_np[:, 2].copy(), -normals_np[:, 1].copy()
++            if not self.isPixal3D:
++                vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2].copy(), -vertices_np[:, 1].copy()
++                normals_np[:, 1], normals_np[:, 2] = normals_np[:, 2].copy(), -normals_np[:, 1].copy()
+             
+             # Create mesh with vertex colors using ColorVisuals
+             if use_custom_normals:
+@@ -3185,13 +3286,18 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         pos = dr.interpolate(vertices_torch.unsqueeze(0), rast, faces_torch)[0][0]
+         
+         attrs = torch.zeros(texture_size, texture_size, pbr_voxel.shape[1], device=self.device)
+-        attrs[mask] = flex_gemm.ops.grid_sample.grid_sample_3d(
+-            pbr_voxel.feats,
+-            pbr_voxel.coords,
+-            shape=torch.Size([*pbr_voxel.shape, *pbr_voxel.spatial_shape]),
+-            grid=((pos[mask] + 0.5) * resolution).reshape(1, -1, 3),
+-            mode='trilinear',
+-        ).float()
++        flat_attrs = attrs.reshape(-1, pbr_voxel.shape[1])
++        flat_pos = pos.reshape(-1, 3)
++        pixel_indices = mask.reshape(-1).nonzero().flatten()
++        for start in range(0, pixel_indices.numel(), 262144):
++            active = pixel_indices[start:start + 262144]
++            flat_attrs[active] = flex_gemm.ops.grid_sample.grid_sample_3d(
++                pbr_voxel.feats,
++                pbr_voxel.coords,
++                shape=torch.Size([*pbr_voxel.shape, *pbr_voxel.spatial_shape]),
++                grid=((flat_pos[active] + 0.5) * resolution).reshape(1, -1, 3),
++                mode='trilinear',
++            ).float().reshape(-1, pbr_voxel.shape[1])
+         
+         torch.cuda.synchronize()
+         
+@@ -3228,8 +3334,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+         )
+ 
+         # Swap Y and Z axes, invert Y (common conversion for GLB compatibility)
+-        vertices[:, 1], vertices[:, 2] = vertices[:, 2], -vertices[:, 1]
+-        normals[:, 1], normals[:, 2] = normals[:, 2], -normals[:, 1]
++        if not self.isPixal3D:
++            vertices[:, 1], vertices[:, 2] = vertices[:, 2], -vertices[:, 1]
++            normals[:, 1], normals[:, 2] = normals[:, 2], -normals[:, 1]
+         uvs[:, 1] = 1 - uvs[:, 1] # Flip UV V-coordinate
+         
+         if use_custom_normals:
+@@ -3320,7 +3427,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+             tex_slat = self.sample_tex_slat(
+                 cond, tex_model,
+                 shape_slat, tex_slat_sampler_params,
+-                sampler=sampler
++                sampler=sampler,
++                proj_grid_resolution=resolution // 16,
+             )
+             
+             if not self.keep_models_loaded:
+@@ -3337,6 +3445,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 shape_slat, tex_slat_sampler_params, sampler=sampler,
+                 proj_image_cond_model=tex_1024_model,
+                 proj_images=images if tex_attn_mode == 'proj' else None,
++                fixed_mesh_projection=True,
++                proj_grid_resolution=resolution // 16,
+             )
+ 
+             if not self.keep_models_loaded:
+@@ -3345,7 +3455,15 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                     self.unload_pixal3d_image_cond_tex_1024()
+ 
+         torch.cuda.empty_cache()
+-        pbr_voxel = self.decode_tex_slat(tex_slat)
++        if self.isPixal3D:
++            # The Pixal3D texture decoder must follow the shape decoder's
++            # subdivision hierarchy, even when the supplied mesh is retained.
++            _, guide_subs = self.decode_shape_slat(shape_slat, resolution, use_tiled=True)
++            print(f'[Trellis2] Guiding Pixal3D texture decoder with {len(guide_subs)} shape subdivisions.')
++            pbr_voxel = self.decode_tex_slat(tex_slat, guide_subs)
++            del guide_subs
++        else:
++            pbr_voxel = self.decode_tex_slat(tex_slat)
+         torch.cuda.empty_cache()
+ 
+         out_mesh, baseColorTexture, metallicRoughnessTexture = self.postprocess_mesh(mesh, pbr_voxel, resolution, texture_size, texture_alpha_mode, double_side_material, bake_on_vertices, use_custom_normals, uv_unwrap_method, mesh_cluster_threshold_cone_half_angle_rad, inpainting)
+@@ -3686,7 +3804,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 tex_slat = self.sample_tex_slat(
+                     cond, self.models['tex_slat_flow_model_512'],
+                     shape_slat, tex_slat_sampler_params,
+-                    sampler=sampler
++                    sampler=sampler,
++                    proj_grid_resolution=resolution // 16,
+                 )
+             
+             if not self.keep_models_loaded:
+@@ -3716,7 +3835,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 self.load_tex_slat_flow_model_1024()
+                 tex_slat = self.sample_tex_slat(
+                     cond, self.models['tex_slat_flow_model_1024'],
+-                    shape_slat, tex_slat_sampler_params, sampler=sampler
++                    shape_slat, tex_slat_sampler_params, sampler=sampler,
++                    proj_grid_resolution=resolution // 16,
+                 )
+             
+             if not self.keep_models_loaded:
+@@ -3746,7 +3866,8 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 self.load_tex_slat_flow_model_1024()
+                 tex_slat = self.sample_tex_slat(
+                     cond, self.models['tex_slat_flow_model_1024'],
+-                    shape_slat, tex_slat_sampler_params, sampler=sampler
++                    shape_slat, tex_slat_sampler_params, sampler=sampler,
++                    proj_grid_resolution=resolution // 16,
+                 )
+             
+             if not self.keep_models_loaded:
+@@ -3766,3 +3887,5 @@ class Trellis2ImageTo3DPipeline(Pipeline):
+                 return out_mesh, (shape_slat, None, res)
+         else:
+             return out_mesh      
++
++
+diff --git a/trellis2_gguf/representations/mesh/base.py b/trellis2_gguf/representations/mesh/base.py
+index e9b9c7b..2e8f185 100644
+--- a/trellis2_gguf/representations/mesh/base.py
++++ b/trellis2_gguf/representations/mesh/base.py
+@@ -250,6 +250,7 @@ class MeshWithVoxel(Mesh, Voxel):
+         attrs: torch.Tensor,
+         voxel_shape: torch.Size,
+         layout: Dict = {},
++        coordinate_system: str = 'z_up',
+     ):
+         self.vertices = vertices.float()
+         self.faces = faces.int()
+@@ -259,6 +260,7 @@ class MeshWithVoxel(Mesh, Voxel):
+         self.attrs = attrs
+         self.voxel_shape = voxel_shape
+         self.layout = layout
++        self.coordinate_system = coordinate_system
+ 
+     def to(self, device, non_blocking=False):
+         return MeshWithVoxel(
+@@ -266,10 +268,11 @@ class MeshWithVoxel(Mesh, Voxel):
+             self.faces.to(device, non_blocking=non_blocking),
+             self.origin.tolist(),
+             self.voxel_size,
+-            self.coords.to(device, non_blocking=non_blocking),
+-            self.attrs.to(device, non_blocking=non_blocking),
++            self.coords.to(device, non_blocking=non_blocking) if self.coords is not None else None,
++            self.attrs.to(device, non_blocking=non_blocking) if self.attrs is not None else None,
+             self.voxel_shape,
+             self.layout,
++            self.coordinate_system,
+         )
+         
+     def query_attrs(self, xyz):
+diff --git a/trellis2_gguf/utils/gguf_utils.py b/trellis2_gguf/utils/gguf_utils.py
+index 5be7118..a400960 100644
+--- a/trellis2_gguf/utils/gguf_utils.py
++++ b/trellis2_gguf/utils/gguf_utils.py
+@@ -880,15 +880,24 @@ class GGMLMultiHeadRMSNorm(GGMLLayer):
+         feats = x.feats if is_sparse else x
+         gamma, _ = self.cast_bias_weight(feats)
+         scale = getattr(self, "scale", feats.shape[-1] ** 0.5)
++        def chunked_normalize(values):
++            out = torch.empty_like(values)
++            chunk_size = max(1, 8 * 1024 * 1024 // max(1, values.shape[-1]))
++            for start in range(0, values.shape[0], chunk_size):
++                end = min(start + chunk_size, values.shape[0])
++                piece = values[start:end].float()
++                out[start:end] = (torch.nn.functional.normalize(piece, dim=-1) * gamma * scale).to(out.dtype)
++                del piece
++            return out
+         # Exact formula matching MultiHeadRMSNorm / SparseMultiHeadRMSNorm:
+         #   out = F.normalize(x.float(), dim=-1) * gamma * scale
+         if is_sparse:
+             x_type = x.dtype
+-            normed = torch.nn.functional.normalize(feats.float(), dim=-1) * gamma * scale
++            normed = chunked_normalize(feats)
+             return x.replace(normed).to(x_type)
+         else:
+             x_type = x.dtype
+-            normed = torch.nn.functional.normalize(x.float(), dim=-1) * gamma * scale
++            normed = chunked_normalize(x)
+             return normed.to(x_type)
+ 
+ 
+diff --git a/trellis2_gguf/utils/sdnq_fast_loader.py b/trellis2_gguf/utils/sdnq_fast_loader.py
+index c3914d7..be548fc 100644
+--- a/trellis2_gguf/utils/sdnq_fast_loader.py
++++ b/trellis2_gguf/utils/sdnq_fast_loader.py
+@@ -250,16 +250,8 @@ def fast_sdnq_load(
+         if has_var_kw or k in sig.parameters
+     }
+ 
+-    # Disable random init (avoid writing random values to weights we'll immediately overwrite)
+-    init = torch.nn.init
+-    _init_funcs = [
+-        "normal_", "kaiming_uniform_", "uniform_", "zeros_", "ones_",
+-        "kaiming_normal_", "xavier_uniform_", "xavier_normal_", "constant_",
+-    ]
+-    _orig = {n: getattr(init, n) for n in _init_funcs if hasattr(init, n)}
+-    _noop = lambda t, *a, **k: t
+-    for n in _orig:
+-        setattr(init, n, _noop)
++    # NOTE: patching torch.nn.init here caused access violations in c10.dll
++    # while building large models with GGUF checkpoints loaded; keep real init.
+     _orig_init_weights = getattr(model_class, "initialize_weights", None)
+     if _orig_init_weights:
+         model_class.initialize_weights = lambda self: None
+@@ -267,8 +259,6 @@ def fast_sdnq_load(
+     try:
+         model = model_class(**final_args)
+     finally:
+-        for n, fn in _orig.items():
+-            setattr(init, n, fn)
+         if _orig_init_weights:
+             model_class.initialize_weights = _orig_init_weights
+ 
+diff --git a/trellis2_gguf/trainers/flow_matching/mixins/image_conditioned_proj.py b/trellis2_gguf/trainers/flow_matching/mixins/image_conditioned_proj.py
+new file mode 100644
+--- /dev/null
++++ b/trellis2_gguf/trainers/flow_matching/mixins/image_conditioned_proj.py
+@@ -0,0 +1,1757 @@
++"""
++View-Aligned (Projection) Image Conditioned Mixin for TRELLIS2
++
++This module implements DINOv3-based feature extraction with view-aligned projection,
++supporting camera-aware 3D-to-2D feature mapping.
++"""
++
++from typing import *
++import os
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++from torchvision import transforms
++from transformers import DINOv3ViTModel
++import numpy as np
++from PIL import Image, ImageDraw
++
++import torch.distributed as dist
++from ....utils.host_buffers import copy_features_to_cpu
++from ....utils import dist_utils
++from ....utils.dist_utils import read_file_dist
++
++
++# =============================================================================
++# Projection Utilities
++# =============================================================================
++
++def project_points_to_image_batch(
++    points_3d: torch.Tensor, 
++    transform_matrix: torch.Tensor, 
++    camera_angle_x: torch.Tensor, 
++    resolution: int = 518
++) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++    """
++    Project 3D points to 2D image coordinates (batch processing).
++    
++    Args:
++        points_3d: torch.Tensor, shape [N, 3] or [B, N, 3], 3D point coordinates (in [-1, 1] range)
++        transform_matrix: torch.Tensor, shape [B, 4, 4], camera transformation matrix
++        camera_angle_x: torch.Tensor, shape [B], horizontal field of view angle (radians)
++        resolution: int, image resolution, default 518
++    
++    Returns:
++        points_2d: torch.Tensor, shape [B, N, 2], image coordinates [x, y]
++        depth: torch.Tensor, shape [B, N], depth values
++        valid_mask: torch.Tensor, shape [B, N], mask for points within view
++    """
++    device = points_3d.device
++    B = transform_matrix.shape[0]
++    
++    # Ensure inputs are torch.Tensor on correct device
++    if not isinstance(transform_matrix, torch.Tensor):
++        transform_matrix = torch.tensor(transform_matrix, dtype=torch.float32, device=device)
++    if not isinstance(points_3d, torch.Tensor):
++        points_3d = torch.tensor(points_3d, dtype=torch.float32, device=device)
++    if not isinstance(camera_angle_x, torch.Tensor):
++        camera_angle_x = torch.tensor(camera_angle_x, dtype=torch.float32, device=device)
++    
++    # Expand points_3d to batch dimension: [N, 3] -> [B, N, 3]
++    if points_3d.dim() == 2:
++        points_3d_batch = points_3d.unsqueeze(0).expand(B, -1, -1)
++    else:
++        points_3d_batch = points_3d
++    N = points_3d_batch.shape[1]
++    
++    # Add homogeneous coordinates: [B, N, 3] -> [B, N, 4]
++    ones = torch.ones(B, N, 1, device=device, dtype=points_3d_batch.dtype)
++    points_homogeneous = torch.cat([points_3d_batch, ones], dim=-1)  # [B, N, 4]
++    
++    # Compute world to camera transformation matrix
++    world_to_camera = torch.linalg.inv(transform_matrix.float()).to(transform_matrix.dtype)  # linalg.inv requires fp32+
++    
++    # Batch transform to camera coordinate system: [B, N, 4] @ [B, 4, 4]^T -> [B, N, 3]
++    points_camera = torch.bmm(points_homogeneous, world_to_camera.transpose(-2, -1))[..., :3]  # [B, N, 3]
++    
++    # Extract camera coordinates
++    x_cam = points_camera[..., 0]  # [B, N]
++    y_cam = points_camera[..., 1]  # [B, N]
++    z_cam = points_camera[..., 2]  # [B, N]
++    
++    # Depth value (Z value in camera coordinate system, note Blender camera faces -Z direction)
++    depth = -z_cam  # [B, N]
++    
++    # Compute camera intrinsics (batch processing)
++    sensor_width = 32.0  # mm
++    focal_length = 16.0 / torch.tan(camera_angle_x / 2.0)  # [B]
++    focal_length_pixels = focal_length * resolution / sensor_width  # [B]
++    
++    # Expand focal_length_pixels dimension for broadcasting: [B] -> [B, 1]
++    focal_length_pixels = focal_length_pixels.unsqueeze(1)  # [B, 1]
++    
++    # Perspective projection to NDC coordinates
++    x_ndc = focal_length_pixels * x_cam / (-z_cam + 1e-8)  # [B, N]
++    y_ndc = focal_length_pixels * y_cam / (-z_cam + 1e-8)  # [B, N]
++    
++    # Convert to image coordinates (pixel coordinates)
++    x_pixel = x_ndc + resolution / 2.0  # [B, N]
++    y_pixel = -y_ndc + resolution / 2.0  # [B, N], flip Y axis
++    
++    # Create validity mask (points within image range and in front of camera)
++    valid_mask = (
++        (x_pixel >= 0) & (x_pixel < resolution) &
++        (y_pixel >= 0) & (y_pixel < resolution) &
++        (depth > 0)  # In front of camera
++    )  # [B, N]
++    
++    points_2d = torch.stack([x_pixel, y_pixel], dim=-1)  # [B, N, 2]
++    
++    return points_2d, depth, valid_mask
++
++
++def sample_features(fmap: torch.Tensor, queries_ndc: torch.Tensor) -> torch.Tensor:
++    """
++    Sample features from feature map at specified NDC coordinates.
++    
++    Args:
++        fmap: torch.Tensor, shape [B, C, H, W], feature map
++        queries_ndc: torch.Tensor, shape [B, K, 2], normalized device coordinates
++    
++    Returns:
++        torch.Tensor, shape [B, C, K], sampled features
++    """
++    B, C, H, W = fmap.shape
++    Bq, K, _ = queries_ndc.shape
++    assert Bq == B, "Batch size mismatch"
++
++    # grid_sample requires (B, out_h, out_w, 2), here we want K points -> out_h=K, out_w=1
++    grid = queries_ndc.view(B, K, 1, 2)  # (B, K, 1, 2)
++
++    # Bilinear interpolation, align_corners=False (consistent with [-1,1] pixel center convention)
++    feat = F.grid_sample(
++        fmap, grid, mode='bilinear',
++        align_corners=False, padding_mode='border'  # border avoids out-of-bound becoming 0
++    )  # (B, C, K, 1)
++
++    return feat.squeeze(-1)  # (B, C, K)
++
++
++# =============================================================================
++# Projection Grid Module
++# =============================================================================
++
++class ProjGrid(nn.Module):
++    """
++    3D Grid Projection Module.
++    
++    Projects a 3D grid of points to 2D image coordinates and samples features 
++    from the image feature map at those locations.
++    
++    This is the core module for view-aligned feature extraction.
++    """
++    def __init__(self, grid_resolution: int = 16, image_resolution: int = 518):
++        super().__init__()
++        self.grid_resolution = grid_resolution
++        self.image_resolution = image_resolution
++        
++        # Create 3D grid points
++        one_dim = torch.linspace(-1, 1, grid_resolution)
++        x, y, z = torch.meshgrid(one_dim, one_dim, one_dim, indexing='ij')
++        grid_points = torch.stack((x, y, z), dim=-1)
++        
++        # Rotation matrix to align with Blender coordinate system
++        rotation_matrix = torch.tensor([
++            [1.0, 0.0, 0.0],
++            [0.0, 0.0, -1.0],
++            [0.0, 1.0, 0.0]
++        ])
++        grid_points = torch.matmul(grid_points, rotation_matrix.T)
++        grid_points = grid_points.reshape(-1, 3)
++        self.register_buffer('grid_points', grid_points)  # [R³, 3]
++        
++        # Default front view transformation matrix
++        front_view_transform_matrix = torch.tensor([
++            [1.0, 0.0, 0.0, 0.0],
++            [0.0, 0.0, -1.0, -2.0],
++            [0.0, 1.0, 0.0, 0.0],
++            [0.0, 0.0, 0.0, 1.0]
++        ])
++        self.register_buffer("front_view_transform_matrix", front_view_transform_matrix)
++        
++    def forward(
++        self, 
++        features_map: torch.Tensor, 
++        camera_angle_x: torch.Tensor,
++        distance: torch.Tensor,
++        mesh_scale: torch.Tensor,
++        transform_matrix: Optional[torch.Tensor] = None,
++        BHWC: bool = True
++    ) -> torch.Tensor:
++        """
++        Project 3D grid points to image and sample features.
++        
++        Args:
++            features_map: Feature map, shape [B, H, W, C] if BHWC else [B, C, H, W]
++            camera_angle_x: Camera FOV angle, shape [B]
++            distance: Camera distance, shape [B]
++            mesh_scale: Mesh scale factor, shape [B]
++            transform_matrix: Optional camera transform matrix, shape [B, 4, 4]
++            BHWC: Whether features_map is in BHWC format
++            
++        Returns:
++            Projected features, shape [B, grid_resolution³, C]
++        """
++        if BHWC:
++            B, H, W, C = features_map.shape
++        else:
++            B, C, H, W = features_map.shape
++            
++        grid_points = self.grid_points
++        grid_points = grid_points.expand(B, -1, -1)
++        grid_points = grid_points / mesh_scale.unsqueeze(-1).unsqueeze(-1) / 2  # Scale alignment
++        assert transform_matrix is None, "transform_matrix is not None"
++        if transform_matrix is None:
++            transform_matrix = self.front_view_transform_matrix
++            transform_matrix = transform_matrix.expand(B, -1, -1).clone()
++            transform_matrix[:, 1, 3] = -distance  # Set camera distance
++            
++        # Project to image coordinates (simulate Blender projection)
++        image_points, depth, valid_mask = project_points_to_image_batch(
++            grid_points, transform_matrix, camera_angle_x, self.image_resolution
++        )
++        
++        # Normalize to [-1, 1] for grid_sample
++        image_points_norm = (image_points + 0.5) / self.image_resolution * 2 - 1
++        
++        if BHWC:
++            features_map = features_map.permute(0, 3, 1, 2)  # [B, C, H, W]
++            
++        # Sample features from DINOv3 patch feature map
++        x = sample_features(features_map, image_points_norm)  # [B, C, K]
++        x = x.permute(0, 2, 1)  # [B, K, C]
++   
++        return x
++    
++    def visualize_projection(
++        self,
++        image: torch.Tensor,
++        camera_angle_x: torch.Tensor,
++        distance: torch.Tensor,
++        mesh_scale: torch.Tensor,
++        transform_matrix: Optional[torch.Tensor] = None,
++        save_dir: Optional[str] = None,
++        prefix: str = "proj_vis",
++    ) -> List[Image.Image]:
++        """
++        Visualize the projected 3D grid points on the input image.
++        
++        Args:
++            image: Input image tensor [B, C, H, W], assumed to be in [0, 1] range
++            camera_angle_x: Camera FOV angle, shape [B]
++            distance: Camera distance, shape [B]
++            mesh_scale: Mesh scale factor, shape [B]
++            transform_matrix: Optional camera transform matrix, shape [B, 4, 4]
++            save_dir: Directory to save visualizations (optional)
++            prefix: Prefix for saved files
++            
++        Returns:
++            List of PIL Images with projected points overlaid
++        """
++        B = image.shape[0]
++        
++        # Get projected points
++        grid_points = self.grid_points.expand(B, -1, -1)
++        grid_points = grid_points / mesh_scale.unsqueeze(-1).unsqueeze(-1) / 2
++        assert transform_matrix is None, "transform_matrix is not None"
++        if transform_matrix is None:
++            transform_matrix = self.front_view_transform_matrix
++            transform_matrix = transform_matrix.expand(B, -1, -1).clone()
++            transform_matrix[:, 1, 3] = -distance
++            
++        image_points, depth, valid_mask = project_points_to_image_batch(
++            grid_points, transform_matrix, camera_angle_x, self.image_resolution
++        )
++        
++        # Convert image to PIL for visualization
++        vis_images = []
++        for b in range(B):
++            # Convert tensor to PIL image
++            img_np = image[b].cpu().permute(1, 2, 0).numpy()
++            img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
++            
++            # Resize to image_resolution if needed
++            pil_img = Image.fromarray(img_np)
++            if pil_img.size != (self.image_resolution, self.image_resolution):
++                pil_img = pil_img.resize((self.image_resolution, self.image_resolution), Image.LANCZOS)
++            
++            # Create a copy for drawing
++            vis_img = pil_img.copy()
++            draw = ImageDraw.Draw(vis_img)
++            
++            # Get points for this batch
++            pts = image_points[b].cpu().numpy()  # [K, 2]
++            depths = depth[b].cpu().numpy()  # [K]
++            mask = valid_mask[b].cpu().numpy()  # [K]
++            
++            # Normalize depth for coloring
++            valid_depths = depths[mask]
++            if len(valid_depths) > 0:
++                d_min, d_max = valid_depths.min(), valid_depths.max()
++                if d_max - d_min > 1e-6:
++                    depths_norm = (depths - d_min) / (d_max - d_min)
++                else:
++                    depths_norm = np.ones_like(depths) * 0.5
++            else:
++                depths_norm = np.ones_like(depths) * 0.5
++            
++            # Draw projected points
++            R = self.grid_resolution
++            for i, (pt, d, m, dn) in enumerate(zip(pts, depths, mask, depths_norm)):
++                if not m:
++                    continue
++                    
++                x, y = pt
++                
++                # Color by depth (blue=near, red=far)
++                r = int(255 * dn)
++                g = int(255 * (1 - abs(2 * dn - 1)))
++                b_color = int(255 * (1 - dn))
++                color = (r, g, b_color)
++                
++                # Draw small circle
++                radius = 2
++                draw.ellipse(
++                    [x - radius, y - radius, x + radius, y + radius],
++                    fill=color,
++                    outline=color
++                )
++            
++            vis_images.append(vis_img)
++            
++            # Save if directory is specified
++            if save_dir is not None:
++                os.makedirs(save_dir, exist_ok=True)
++                save_path = os.path.join(save_dir, f"{prefix}_batch{b}.png")
++                vis_img.save(save_path)
++                print(f"Saved projection visualization to: {save_path}")
++        
++        return vis_images
++
++
++# =============================================================================
++# DINOv3 Feature Extractor with Projection
++# =============================================================================
++
++class DinoV3ProjFeatureExtractor(nn.Module):
++    """
++    DINOv3 Feature Extractor with View-Aligned Projection.
++    
++    This extractor produces both:
++    1. Global features (CLS token + register tokens) in embed_dim
++    2. View-aligned projected features (3D grid projected to 2D and sampled)
++       - Without NAF: [B, R³, embed_dim]
++       - With NAF:    [B, R³, embed_dim * 2]  (concat of lr and hr features)
++    
++    NOTE: proj_linear has been moved to per-block ProjectAttention / SparseProjectAttention.
++    This module now outputs raw DINOv3 features for proj (optionally concatenated with NAF-upsampled features).
++    
++    Args:
++        model_name: Name of the pretrained DINOv3 model
++        image_size: Input image size (default: 512)
++        grid_resolution: Resolution of the 3D projection grid (default: 16)
++        use_naf_upsample: Whether to use NAF to upsample features (default: False)
++        naf_target_size: Target spatial size for NAF upsampling (default: [128, 128])
++    """
++    def __init__(
++        self, 
++        model_name: str,
++        image_size: int = 512,
++        grid_resolution: int = 16,
++        use_naf_upsample: bool = False,
++        naf_target_size: Optional[List[int]] = None
++    ):
++        super().__init__()
++        self.model_name = model_name
++        self.image_size = image_size
++        self.grid_resolution = grid_resolution
++        self.use_naf_upsample = use_naf_upsample
++        if naf_target_size is None:
++            self.naf_target_size = (128, 128)
++        elif isinstance(naf_target_size, int):
++            self.naf_target_size = (naf_target_size, naf_target_size)
++        else:
++            self.naf_target_size = tuple(naf_target_size)
++        
++        # Load DINOv3 model (frozen, no trainable params in this module)
++        self.model = DINOv3ViTModel.from_pretrained(model_name)
++        self.model.eval()
++        self.model.requires_grad_(False)
++        
++        # Image transform (only normalize, no resize - assume already resized)
++        self.transform = transforms.Compose([
++            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
++        ])
++        
++        # Get patch info
++        self.patch_size = self.model.config.patch_size
++        self.patch_number = image_size // self.patch_size
++        self.embed_dim = self.model.config.hidden_size
++        
++        # Projection grid for view-aligned features
++        self.proj_grid = ProjGrid(
++            grid_resolution=grid_resolution,
++            image_resolution=image_size
++        )
++        
++        # NAF upsampler (frozen, no trainable params)
++        self.naf_model = None  # Lazy-loaded on first use to avoid import if not needed
++        self._naf_is_bilinear = False
++
++        # Per-axis spatial tile factor for the NAF + proj_grid streaming path. 1 = un-tiled
++        # (current behavior, default). >1 enables a streaming wrapper that tiles NAF and
++        # the projection together, capping the transient HR-feature-map peak. Set transiently
++        # by the pipeline (see Pixal3DImageTo3DPipeline.get_proj_cond_shape).
++        self.naf_tile_factor: int = 1
++
++        # proj_channels: the output dimension of proj features
++        # Without NAF: embed_dim (e.g. 1024)
++        # With NAF: embed_dim * 2 (e.g. 2048, concat of lr and hr)
++        self.proj_channels = self.embed_dim * 2 if use_naf_upsample else self.embed_dim
++        
++        # NOTE: proj_linear removed — now lives in each denoiser block's ProjectAttention
++    
++    def _cached_naf_repo(self) -> Optional[str]:
++        import torch.hub
++
++        hub_dir = torch.hub.get_dir()
++        if not os.path.isdir(hub_dir):
++            return None
++        for name in os.listdir(hub_dir):
++            repo_dir = os.path.join(hub_dir, name)
++            if name.startswith("valeoai_NAF_") and os.path.exists(os.path.join(repo_dir, "hubconf.py")):
++                return repo_dir
++        return None    
++    
++    def _load_naf(self):
++        """Lazy-load pretrained NAF model."""
++        if self.naf_model is None:
++            import torch.hub
++            device = next(self.model.parameters()).device            
++            cached_repo = self._cached_naf_repo()
++
++            self._naf_is_bilinear = False
++
++            # NAF is an optional quality enhancement.  On clean/offline
++            # installs torch.hub may fail (GitHub rate limits) or the native
++            # ``natten`` extension may be unavailable.  Keep the feature
++            # dimensionality intact with a deterministic bilinear fallback so
++            # the GGUF pipeline remains runnable without network access.
++            try:
++                if cached_repo is not None:
++                    self.naf_model = torch.hub.load(
++                        cached_repo, "naf", pretrained=True, device=device, source="local", trust_repo=True
++                    )
++                else:
++                    self.naf_model = torch.hub.load(
++                        "valeoai/NAF", "naf", pretrained=True, device=device, trust_repo=True
++                    )
++            except Exception as exc:
++                import torch.nn.functional as F
++
++                class _BilinearNAFFallback(nn.Module):
++                    def forward(self, image, features, target_size):
++                        if isinstance(target_size, int):
++                            target_size = (target_size, target_size)
++                        return F.interpolate(features, size=tuple(target_size), mode="bilinear", align_corners=False)
++
++                self.naf_model = _BilinearNAFFallback().to(device)
++                self._naf_is_bilinear = True
++                print(f"[Trellis2-GGUF] NAF unavailable ({exc}); using bilinear feature upsampling fallback.")
++
++            self.naf_model.eval()
++            self.naf_model.requires_grad_(False)
++        
++    def to(self, device):
++        super().to(device)
++        self.model.to(device)
++        self.proj_grid.to(device)
++        if self.naf_model is not None:
++            self.naf_model.to(device)
++        return self
++
++    def cuda(self):
++        super().cuda()
++        self.model.cuda()
++        self.proj_grid.cuda()
++        if self.naf_model is not None:
++            self.naf_model.cuda()
++        return self
++
++    def cpu(self):
++        super().cpu()
++        self.model.cpu()
++        self.proj_grid.cpu()
++        if self.naf_model is not None:
++            self.naf_model.cpu()
++        return self
++    
++    def extract_features(self, image: torch.Tensor) -> torch.Tensor:
++        """Extract features using DINOv3."""
++        image = image.to(self.model.embeddings.patch_embeddings.weight.dtype)
++        hidden_states = self.model.embeddings(image, bool_masked_pos=None)
++        position_embeddings = self.model.rope_embeddings(image)
++
++        for layer_module in self.model.layer:
++            hidden_states = layer_module(
++                hidden_states,
++                position_embeddings=position_embeddings,
++            )
++
++        return F.layer_norm(hidden_states, hidden_states.shape[-1:])
++    
++    def forward(
++        self,
++        image: Union[torch.Tensor, List[Image.Image]],
++        camera_angle_x: Optional[torch.Tensor] = None,
++        distance: Optional[torch.Tensor] = None,
++        mesh_scale: Optional[torch.Tensor] = None,
++        transform_matrix: Optional[torch.Tensor] = None,
++    ) -> Tuple[torch.Tensor, torch.Tensor]:
++        """
++        Extract view-aligned features from the image.
++        
++        Args:
++            image: Input image tensor [B, C, H, W] or list of PIL images
++            camera_angle_x: Camera FOV angle in radians [B]
++            distance: Camera distance [B]
++            mesh_scale: Mesh scale factor [B]
++            transform_matrix: Optional camera transform matrix [B, 4, 4]
++        
++        Returns:
++            Tuple of (global_features, proj_features):
++            - global_features: [B, num_global_tokens, embed_dim]
++            - proj_features: [B, grid_resolution³, proj_channels]
++              where proj_channels = embed_dim (no NAF) or embed_dim*2 (with NAF)
++        """
++        # Handle input types
++        if isinstance(image, torch.Tensor):
++            assert image.ndim == 4, "Image tensor should be batched (B, C, H, W)"
++        elif isinstance(image, list):
++            assert all(isinstance(i, Image.Image) for i in image), "Image list should be list of PIL images"
++            image = [i.resize((self.image_size, self.image_size), Image.LANCZOS) for i in image]
++            image = [np.array(i.convert('RGB')).astype(np.float32) / 255 for i in image]
++            image = [torch.from_numpy(i).permute(2, 0, 1).float() for i in image]
++            image = torch.stack(image).cuda()
++        else:
++            raise ValueError(f"Unsupported type of image: {type(image)}")
++        
++        B = image.shape[0]
++        
++        # Keep a copy of the unnormalized image for NAF guide
++        if self.use_naf_upsample:
++            image_for_naf = image.clone()  # [B, 3, H, W], in [0, 1] range
++        
++        # Apply transform (ImageNet normalization)
++        image = self.transform(image)
++        
++        # Extract DINOv3 features (frozen, no gradients)
++        with torch.no_grad():
++            z = self.extract_features(image)
++            
++            # Split into CLS token, register tokens, and patch tokens
++            z_clstoken = z[:, 0:1]  # [B, 1, D]
++            num_reg = getattr(self.model.config, 'num_register_tokens', 4)
++            z_regtokens = z[:, 1:1+num_reg]  # [B, num_reg, D]
++            z_patchtokens = z[:, 1+num_reg:]  # [B, num_patches, D]
++            
++            # Reshape patch tokens to spatial grid: [B, h, w, D]
++            z_patchtokens_spatial = z_patchtokens.reshape(
++                B, self.patch_number, self.patch_number, -1
++            )  # [B, h, w, D]
++            
++            if camera_angle_x is None or distance is None or mesh_scale is None:
++                raise ValueError("camera_angle_x, distance, and mesh_scale must be provided")
++            
++            # --- Low-resolution branch: sample from DINOv3 patch feature map ---
++            z_proj_lr = self.proj_grid(
++                z_patchtokens_spatial, 
++                camera_angle_x, 
++                distance, 
++                mesh_scale,
++                transform_matrix
++            )  # [B, grid_res³, D]
++            
++            # --- High-resolution branch (NAF): upsample then sample ---
++            if self.use_naf_upsample:
++                self._load_naf()
++                # NAF expects: guide [B, 3, H, W], lr_features [B, C, h, w], target_size (H', W')
++                lr_features_bchw = z_patchtokens_spatial.permute(0, 3, 1, 2)  # [B, D, h, w]
++
++                K = getattr(self, 'naf_tile_factor', 1) or 1
++                if K <= 1:
++                    # Un-tiled path (default, unchanged behavior).
++                    hr_features = self.naf_model(
++                        image_for_naf, lr_features_bchw, self.naf_target_size
++                    )  # [B, D, H', W']
++
++                    # Sample from high-res feature map using same projection coordinates
++                    z_proj_hr = self.proj_grid(
++                        hr_features,
++                        camera_angle_x,
++                        distance,
++                        mesh_scale,
++                        transform_matrix,
++                        BHWC=False  # hr_features is [B, C, H', W']
++                    )  # [B, grid_res³, D]
++                    del hr_features
++                else:
++                    # Tiled streaming path: bound the transient HR feature map by running
++                    # NAF and the projection sample one image-space tile at a time.
++                    z_proj_hr = self._proj_naf_tiled(
++                        image_for_naf, lr_features_bchw,
++                        camera_angle_x, distance, mesh_scale, transform_matrix,
++                        tile_factor=int(K),
++                    )
++
++                # Concatenate lr and hr: [B, grid_res³, D*2]
++                z_proj = torch.cat([z_proj_lr, z_proj_hr], dim=-1)
++            else:
++                z_proj = z_proj_lr  # [B, grid_res³, D]
++                
++            # Combine global tokens
++            z_global = torch.cat([z_clstoken, z_regtokens], dim=1)  # [B, 1+num_reg, D]
++        
++        # proj_linear has been moved to per-block ProjectAttention
++        # z_proj stays in proj_channels, each block will project independently
++        
++        return z_global, z_proj
++
++    @torch.no_grad()
++    def _proj_naf_tiled(
++        self,
++        image_for_naf: torch.Tensor,
++        lr_features_bchw: torch.Tensor,
++        camera_angle_x: torch.Tensor,
++        distance: torch.Tensor,
++        mesh_scale: torch.Tensor,
++        transform_matrix: Optional[torch.Tensor],
++        tile_factor: int,
++    ) -> torch.Tensor:
++        """Streaming NAF + grid_sample. Materialises only one image-space tile of the NAF
++        output at a time, capping the transient HR-feature-map peak. Returns the same
++        [B, grid_res^3, embed_dim] tensor that proj_grid(naf_model(...)) would produce in
++        the un-tiled path.
++
++        Each 3D grid point is routed to exactly one tile (the tile its projection falls in).
++        Halo at the NAF output scale accounts for the attention dilation (the 9x9
++        neighborhood spans four low-resolution feature cells in each direction).
++        Off-image grid points are clamped to the
++        boundary tile so grid_sample's padding_mode='border' recovers the un-tiled border
++        behaviour for them.
++
++        Encode the whole guide once so GroupNorm statistics and RoPE coordinates
++        match full-image NAF. Only the existing neighborhood attention is tiled,
++        with DINO values and globally pooled keys cropped to the same patch cells.
++        """
++        K = int(tile_factor)
++        naf_h, naf_w = self.naf_target_size  # always a 2-tuple of ints
++        img_size = self.image_size
++        img_res = self.proj_grid.image_resolution  # equals image_size for the configured stages
++
++        feat_h, feat_w = lr_features_bchw.shape[-2:]
++        out_step_h = naf_h // feat_h
++        out_step_w = naf_w // feat_w
++        if (naf_h % feat_h or naf_w % feat_w or img_size % feat_h or img_size % feat_w):
++            raise ValueError('NAF tile sizes must align with the low-resolution feature grid')
++        img_step_h = img_size // feat_h
++        img_step_w = img_size // feat_w
++        halo_cells = 5  # Four cells for 9x9 dilated attention, one for the image encoder.
++
++        B = image_for_naf.shape[0]
++        device = image_for_naf.device
++
++        # Project all 3D grid points once. The output tensor is small (R^3 * 2 floats).
++        grid_pts = self.proj_grid.grid_points.to(device)  # [R^3, 3]
++        grid_pts_b = grid_pts.unsqueeze(0).expand(B, -1, -1)
++        grid_pts_b = grid_pts_b / mesh_scale.unsqueeze(-1).unsqueeze(-1) / 2
++
++        if transform_matrix is None:
++            tm = self.proj_grid.front_view_transform_matrix.to(device)
++            tm = tm.unsqueeze(0).expand(B, -1, -1).clone()
++            tm[:, 1, 3] = -distance
++        else:
++            tm = transform_matrix
++
++        image_points, _, _ = project_points_to_image_batch(
++            grid_pts_b, tm, camera_angle_x, img_res
++        )  # [B, R^3, 2] in pixel coords
++        image_points_norm = (image_points + 0.5) / img_res * 2 - 1  # [B, R^3, 2] in [-1, 1]
++
++        # Clamp off-image points to the boundary so they get routed to a boundary tile and
++        # produce the same border-feature value as padding_mode='border' would in the
++        # un-tiled call.
++        image_points_norm = image_points_norm.clamp(-1.0, 1.0)
++
++        u_global = image_points_norm[..., 0]  # [B, R^3]
++        v_global = image_points_norm[..., 1]
++
++        R3 = grid_pts.shape[0]
++        embed_dim = lr_features_bchw.shape[1]
++        z_proj_hr: Optional[torch.Tensor] = None
++
++        if not self._naf_is_bilinear:
++            guide = image_for_naf
++            if guide.shape[-2] > 4 * naf_h or guide.shape[-1] > 4 * naf_w:
++                guide = F.interpolate(guide, size=(min(guide.shape[-2], 4 * naf_h, 4 * naf_w),
++                                                   min(guide.shape[-1], 4 * naf_w, 4 * naf_h)),
++                                      mode="bilinear", align_corners=False)
++            encoded_image = self.naf_model.image_encoder.forward_encoder(guide, self.naf_target_size)
++            rope = self.naf_model.image_encoder.rope
++            coordinates = rope.create_coordinate(H=naf_h, W=naf_w)
++            encoded_view = encoded_image.reshape(B, rope.num_heads, rope.D_head, -1).transpose(-1, -2)
++            # Reuse native RoPE with global coordinates; bound only its temporary tensors.
++            for start in range(0, naf_h * naf_w, 16384):
++                stop = min(start + 16384, naf_h * naf_w)
++                encoded_view[:, :, start:stop].copy_(rope.rotate(encoded_view[:, :, start:stop], coordinates[start:stop]))
++            global_keys = self.naf_model.key_encoder(encoded_image, lr_features_bchw)
++            # Call-local CPU storage keeps the whole-image guide out of attention's VRAM peak.
++            global_queries = copy_features_to_cpu(self.naf_model.query_encoder(encoded_image))
++            del encoded_view, encoded_image
++
++        for ti in range(K):
++            for tj in range(K):
++                u_lo = -1.0 + 2.0 * tj / K
++                u_hi = -1.0 + 2.0 * (tj + 1) / K
++                v_lo = -1.0 + 2.0 * ti / K
++                v_hi = -1.0 + 2.0 * (ti + 1) / K
++
++                # Half-open partition with the last tile inclusive on the right/bottom.
++                u_in = (u_global >= u_lo) & (u_global <= u_hi if tj == K - 1 else u_global < u_hi)
++                v_in = (v_global >= v_lo) & (v_global <= v_hi if ti == K - 1 else v_global < v_hi)
++                core_mask = u_in & v_in  # [B, R^3]
++                if not core_mask.any():
++                    continue
++
++                # Align output, image and DINO feature crops to the same patch cells.
++                cell_lo_y = max(0, (feat_h * ti // K) - halo_cells)
++                cell_hi_y = min(feat_h, (feat_h * (ti + 1) + K - 1) // K + halo_cells)
++                cell_lo_x = max(0, (feat_w * tj // K) - halo_cells)
++                cell_hi_x = min(feat_w, (feat_w * (tj + 1) + K - 1) // K + halo_cells)
++                out_lo_y, out_hi_y = cell_lo_y * out_step_h, cell_hi_y * out_step_h
++                out_lo_x, out_hi_x = cell_lo_x * out_step_w, cell_hi_x * out_step_w
++                tile_out_h = out_hi_y - out_lo_y
++                tile_out_w = out_hi_x - out_lo_x
++
++                img_lo_y, img_hi_y = cell_lo_y * img_step_h, cell_hi_y * img_step_h
++                img_lo_x, img_hi_x = cell_lo_x * img_step_w, cell_hi_x * img_step_w
++                image_tile = image_for_naf[:, :, img_lo_y:img_hi_y, img_lo_x:img_hi_x].contiguous()
++                feature_tile = lr_features_bchw[:, :, cell_lo_y:cell_hi_y, cell_lo_x:cell_hi_x].contiguous()
++
++                if self._naf_is_bilinear:
++                    tile_hr = self.naf_model(image_tile, feature_tile, (tile_out_h, tile_out_w))
++                else:
++                    tile_hr = self.naf_model.upsampler(
++                        global_queries[:, :, out_lo_y:out_hi_y, out_lo_x:out_hi_x].to(device).contiguous(),
++                        global_keys[:, :, cell_lo_y:cell_hi_y, cell_lo_x:cell_hi_x].contiguous(),
++                        feature_tile,
++                    )  # [B, embed_dim, tile_out_h, tile_out_w]
++
++                if z_proj_hr is None:
++                    z_proj_hr = torch.zeros(
++                        B, R3, embed_dim,
++                        device=tile_hr.device, dtype=tile_hr.dtype,
++                    )
++
++                # Tile's normalised bounds in the FULL feature map's [-1, 1] coord system.
++                tile_v_lo_n = 2.0 * out_lo_y / naf_h - 1.0
++                tile_v_hi_n = 2.0 * out_hi_y / naf_h - 1.0
++                tile_u_lo_n = 2.0 * out_lo_x / naf_w - 1.0
++                tile_u_hi_n = 2.0 * out_hi_x / naf_w - 1.0
++
++                # Per-batch sampling — core_mask varies across batch so we can't share an index.
++                for b in range(B):
++                    mask_b = core_mask[b]
++                    if not mask_b.any():
++                        continue
++                    pts = image_points_norm[b][mask_b]  # [N_core, 2] in global [-1, 1]
++                    local_u = 2.0 * (pts[..., 0] - tile_u_lo_n) / (tile_u_hi_n - tile_u_lo_n) - 1.0
++                    local_v = 2.0 * (pts[..., 1] - tile_v_lo_n) / (tile_v_hi_n - tile_v_lo_n) - 1.0
++                    local_pts = torch.stack([local_u, local_v], dim=-1).unsqueeze(0)  # [1, N_core, 2]
++
++                    feats = sample_features(tile_hr[b:b + 1], local_pts)  # [1, C, N_core]
++                    z_proj_hr[b][mask_b] = feats.squeeze(0).transpose(0, 1).to(z_proj_hr.dtype)
++
++                del tile_hr, image_tile, feature_tile
++
++        if z_proj_hr is None:
++            # No grid point projected on-image at all (degenerate). Return zeros — same shape
++            # as the un-tiled call would produce.
++            z_proj_hr = torch.zeros(
++                B, R3, embed_dim,
++                device=lr_features_bchw.device, dtype=lr_features_bchw.dtype,
++            )
++        return z_proj_hr
++
++    @torch.no_grad()
++    def visualize_projection(
++        self,
++        image: torch.Tensor,
++        camera_angle_x: torch.Tensor,
++        distance: torch.Tensor,
++        mesh_scale: torch.Tensor,
++        transform_matrix: Optional[torch.Tensor] = None,
++        save_dir: Optional[str] = None,
++        prefix: str = "proj_vis",
++    ) -> List[Image.Image]:
++        """
++        Visualize the projected 3D grid points on the input image.
++        
++        This is a convenience method that delegates to ProjGrid.visualize_projection.
++        
++        Args:
++            image: Input image tensor [B, C, H, W], in [0, 1] range (before ImageNet normalization)
++            camera_angle_x: Camera FOV angle, shape [B]
++            distance: Camera distance, shape [B]
++            mesh_scale: Mesh scale factor, shape [B]
++            transform_matrix: Optional camera transform matrix, shape [B, 4, 4]
++            save_dir: Directory to save visualizations (optional)
++            prefix: Prefix for saved files
++            
++        Returns:
++            List of PIL Images with projected points overlaid
++        """
++        return self.proj_grid.visualize_projection(
++            image=image,
++            camera_angle_x=camera_angle_x,
++            distance=distance,
++            mesh_scale=mesh_scale,
++            transform_matrix=transform_matrix,
++            save_dir=save_dir,
++            prefix=prefix,
++        )
++
++
++# =============================================================================
++# DINOv3 + VAE Gated Feature Extractor with Projection
++# =============================================================================
++
++class DinoV3VaeProjFeatureExtractor(nn.Module):
++    """
++    DINOv3 + Flux VAE Feature Extractor with Gated Fusion and View-Aligned Projection.
++    
++    Produces three outputs for GatedProjectAttention:
++    1. Global features (CLS + register tokens from DINOv3) for cross-attention
++    2. Semantic proj features (DINOv3 patch tokens projected to 3D grid)
++    3. Color proj features (Flux VAE latent projected to 3D grid)
++    
++    Both DINOv3 and VAE are frozen. The gated fusion happens inside each
++    denoiser block's GatedProjectAttention module (trainable gate + proj_linears).
++    
++    Args:
++        dino_model_name: Pretrained DINOv3 model name
++        vae_model_name: Pretrained Flux VAE model name
++        image_size: Input image size (default: 512)
++        grid_resolution: Resolution of the 3D projection grid (default: 16)
++    """
++    def __init__(
++        self,
++        dino_model_name: str,
++        vae_model_name: str = "black-forest-labs/FLUX.1-dev",
++        image_size: int = 512,
++        grid_resolution: int = 16,
++    ):
++        super().__init__()
++        self.image_size = image_size
++        self.grid_resolution = grid_resolution
++        
++        # --- DINOv3 backbone (frozen) ---
++        self.dino_model = DINOv3ViTModel.from_pretrained(dino_model_name)
++        self.dino_model.eval()
++        self.dino_model.requires_grad_(False)
++        
++        self.dino_transform = transforms.Compose([
++            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
++        ])
++        
++        self.patch_size = self.dino_model.config.patch_size
++        self.patch_number = image_size // self.patch_size
++        self.embed_dim = self.dino_model.config.hidden_size  # e.g. 1024
++        
++        # --- Flux VAE encoder (frozen, lazy-loaded) ---
++        self.vae_model_name = vae_model_name
++        self._vae = None
++        self.vae_channels = 16  # Flux VAE outputs 16 channels
++        self.vae_downsample = 8  # Flux VAE downsamples by 8x
++        
++        # --- Projection grid (shared) ---
++        self.proj_grid = ProjGrid(
++            grid_resolution=grid_resolution,
++            image_resolution=image_size,
++        )
++        
++        # Expose dimensions for denoiser block construction
++        self.dino_proj_channels = self.embed_dim      # e.g. 1024
++        self.vae_proj_channels = self.vae_channels     # 16
++        # proj_channels is kept for backward compat with _proj_channels in mixin
++        self.proj_channels = self.embed_dim
++        
++    def _load_vae(self):
++        """Lazy-load Flux VAE encoder."""
++        if self._vae is not None:
++            return
++        from diffusers import AutoencoderKL
++        device = next(self.dino_model.parameters()).device
++        vae = AutoencoderKL.from_pretrained(
++            self.vae_model_name,
++            subfolder="vae",
++            torch_dtype=torch.float32,
++        )
++        vae.eval()
++        vae.requires_grad_(False)
++        vae.to(device)
++        self._vae = vae
++    
++    def to(self, device):
++        super().to(device)
++        self.dino_model.to(device)
++        self.proj_grid.to(device)
++        if self._vae is not None:
++            self._vae.to(device)
++        return self
++    
++    def cuda(self):
++        super().cuda()
++        self.dino_model.cuda()
++        self.proj_grid.cuda()
++        if self._vae is not None:
++            self._vae.cuda()
++        return self
++    
++    def cpu(self):
++        super().cpu()
++        self.dino_model.cpu()
++        self.proj_grid.cpu()
++        if self._vae is not None:
++            self._vae.cpu()
++        return self
++    
++    def _extract_dino_features(self, image: torch.Tensor) -> torch.Tensor:
++        """Extract DINOv3 features from normalized image."""
++        image = image.to(self.dino_model.embeddings.patch_embeddings.weight.dtype)
++        hidden_states = self.dino_model.embeddings(image, bool_masked_pos=None)
++        position_embeddings = self.dino_model.rope_embeddings(image)
++        for layer_module in self.dino_model.layer:
++            hidden_states = layer_module(
++                hidden_states,
++                position_embeddings=position_embeddings,
++            )
++        return F.layer_norm(hidden_states, hidden_states.shape[-1:])
++    
++    @torch.no_grad()
++    def _extract_vae_latent(self, image: torch.Tensor) -> torch.Tensor:
++        """Extract Flux VAE latent from unnormalized image [0,1]."""
++        self._load_vae()
++        image_normalized = image * 2.0 - 1.0
++        image_normalized = image_normalized.to(self._vae.dtype)
++        posterior = self._vae.encode(image_normalized)
++        latent = posterior.latent_dist.mode()
++        latent = latent * self._vae.config.scaling_factor
++        return latent.float()  # [B, 16, H/8, W/8]
++    
++    def forward(
++        self,
++        image: Union[torch.Tensor, List[Image.Image]],
++        camera_angle_x: Optional[torch.Tensor] = None,
++        distance: Optional[torch.Tensor] = None,
++        mesh_scale: Optional[torch.Tensor] = None,
++        transform_matrix: Optional[torch.Tensor] = None,
++    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++        """
++        Extract gated features from the image.
++        
++        Returns:
++            Tuple of (global_features, proj_semantic, proj_color):
++            - global_features: [B, num_global_tokens, embed_dim] (DINOv3 CLS + registers)
++            - proj_semantic: [B, grid_res³, embed_dim] (DINOv3 projected features)
++            - proj_color: [B, grid_res³, vae_channels] (VAE projected features)
++        """
++        # Handle input types
++        if isinstance(image, torch.Tensor):
++            assert image.ndim == 4
++        elif isinstance(image, list):
++            assert all(isinstance(i, Image.Image) for i in image)
++            image = [i.resize((self.image_size, self.image_size), Image.LANCZOS) for i in image]
++            image = [np.array(i.convert('RGB')).astype(np.float32) / 255 for i in image]
++            image = [torch.from_numpy(i).permute(2, 0, 1).float() for i in image]
++            image = torch.stack(image).cuda()
++        else:
++            raise ValueError(f"Unsupported type of image: {type(image)}")
++        
++        B = image.shape[0]
++        image_raw = image.clone()  # Keep unnormalized copy for VAE
++        
++        if camera_angle_x is None or distance is None or mesh_scale is None:
++            raise ValueError("camera_angle_x, distance, and mesh_scale must be provided")
++        
++        with torch.no_grad():
++            # --- DINOv3 branch ---
++            dino_input = self.dino_transform(image)
++            z = self._extract_dino_features(dino_input)
++            
++            z_clstoken = z[:, 0:1]
++            num_reg = getattr(self.dino_model.config, 'num_register_tokens', 4)
++            z_regtokens = z[:, 1:1+num_reg]
++            z_patchtokens = z[:, 1+num_reg:]
++            
++            z_patchtokens_spatial = z_patchtokens.reshape(
++                B, self.patch_number, self.patch_number, -1
++            )  # [B, h, w, D]
++            
++            proj_semantic = self.proj_grid(
++                z_patchtokens_spatial,
++                camera_angle_x, distance, mesh_scale, transform_matrix,
++            )  # [B, R³, embed_dim]
++            
++            z_global = torch.cat([z_clstoken, z_regtokens], dim=1)  # [B, 1+num_reg, D]
++            
++            # --- VAE branch ---
++            vae_latent = self._extract_vae_latent(image_raw)  # [B, 16, H/8, W/8]
++            
++            proj_color = self.proj_grid(
++                vae_latent,
++                camera_angle_x, distance, mesh_scale, transform_matrix,
++                BHWC=False,  # VAE latent is [B, C, H, W]
++            )  # [B, R³, 16]
++        
++        return z_global, proj_semantic, proj_color
++
++
++# =============================================================================
++# Image Conditioned Mixin with Projection Support
++# =============================================================================
++
++class ImageConditionedProjMixin:
++    """
++    Mixin for image-conditioned models with view-aligned projection.
++    
++    This mixin adds support for extracting view-aligned features from images
++    using camera parameters.
++    
++    Args:
++        image_cond_model: Configuration for the image conditioning model.
++    """
++    def __init__(self, *args, image_cond_model: dict, **kwargs):
++        # Store config before super().__init__ which calls init_models_and_more
++        self.image_cond_model_config = image_cond_model
++        self.image_cond_model = None  # Will be initialized in init_models_and_more
++        self.image_attn_mode = image_cond_model.get('image_attn_mode', 
++                                image_cond_model.get('args', {}).get('image_attn_mode', 'cross'))
++        super().__init__(*args, **kwargs)
++        
++    def _init_image_cond_model(self):
++        """Initialize the image conditioning model."""
++        with dist_utils.local_master_first():
++            model_name = self.image_cond_model_config['name']
++            model_args = self.image_cond_model_config.get('args', {})
++            
++            if model_name == 'DinoV3ProjFeatureExtractor':
++                self.image_cond_model = DinoV3ProjFeatureExtractor(**model_args)
++            elif model_name == 'DinoV3VaeProjFeatureExtractor':
++                self.image_cond_model = DinoV3VaeProjFeatureExtractor(**model_args)
++            else:
++                # Fallback to standard extractors
++                from . import image_conditioned
++                self.image_cond_model = getattr(image_conditioned, model_name)(**model_args)
++            
++            self.image_cond_model.cuda()
++            
++            # Expose proj_channels for denoiser to know the correct proj_in_channels
++            if hasattr(self.image_cond_model, 'proj_channels'):
++                self._proj_channels = self.image_cond_model.proj_channels
++            else:
++                self._proj_channels = getattr(self.image_cond_model, 'embed_dim', None)
++            # Expose vae_proj_channels for gated_proj mode
++            self._vae_proj_channels = getattr(self.image_cond_model, 'vae_proj_channels', None)
++    
++    def init_models_and_more(self, **kwargs):
++        """
++        Override to handle image_cond_model initialization.
++        
++        Since proj_linear has been moved to per-block ProjectAttention in the denoiser,
++        image_cond_model no longer has any trainable parameters (DINOv3 backbone is frozen,
++        ProjGrid only has register_buffers). Therefore we do NOT add it to self.models
++        (which would trigger DDP wrapping and fail). We just initialize it and keep it
++        as a standalone module for inference.
++        """
++        # Initialize image_cond_model first
++        if self.image_cond_model is None:
++            self._init_image_cond_model()
++        
++        # Keep a reference to the unwrapped module for attribute access
++        self._image_cond_module = self.image_cond_model  # for .grid_resolution etc.
++        
++        # Log that image_cond has no trainable params
++        proj_params = [p for p in self.image_cond_model.parameters() if p.requires_grad]
++        if self.is_master:
++            if proj_params:
++                print(f'\nWARNING: image_cond_model has {len(proj_params)} trainable params, '
++                      f'but is NOT registered in self.models. These will NOT be trained!')
++            else:
++                print(f'\nimage_cond_model has no trainable parameters, skipping DDP/optimizer registration.')
++        
++        # Call base class to set up DDP, optimizer, EMA, etc. (without image_cond)
++        super().init_models_and_more(**kwargs)
++
++    # ------------------------------------------------------------------
++    # Checkpoint save/load overrides: skip DINOv3 backbone weights
++    # ------------------------------------------------------------------
++
++    # Keys in image_cond state_dict that belong to the frozen DINOv3 backbone.
++    # Everything under "model." is DINOv3; we only keep proj_grid.*
++    _IMAGE_COND_BACKBONE_PREFIX = 'model.'
++
++    def _filter_image_cond_state_dict(self, state_dict: dict) -> dict:
++        """Keep only non-backbone keys (proj_grid, etc.) from image_cond state_dict."""
++        return {k: v for k, v in state_dict.items()
++                if not k.startswith(self._IMAGE_COND_BACKBONE_PREFIX)}
++
++    def _fill_denoiser_proj_linear_from_image_cond(
++        self,
++        denoiser_ckpt: dict,
++        denoiser_state_dict: dict,
++        image_cond_ckpt_path: Optional[str] = None,
++    ) -> dict:
++        """
++        Fill missing per-block proj_linear weights in denoiser checkpoint
++        from the old-style image_cond proj_linear (broadcast to all blocks).
++        
++        Also handles shape mismatch when NAF is enabled: old proj_linear has shape
++        [model_ch, embed_dim] but new model expects [model_ch, embed_dim*2].
++        In this case, the old weights are placed in the lr half and the hr half is zero-padded.
++        
++        Compatibility strategy:
++        1. If denoiser_ckpt already contains per-block proj_linear keys with correct shape -> do nothing.
++        2. If shape mismatch (embed_dim vs embed_dim*2) -> zero-pad the weight.
++        3. If keys missing, try to load proj_linear from image_cond checkpoint -> broadcast (with optional pad).
++        
++        Args:
++            denoiser_ckpt: The loaded denoiser state dict
++            denoiser_state_dict: The model's current state dict (to find expected keys)
++            image_cond_ckpt_path: Path to image_cond checkpoint file (optional)
++            
++        Returns:
++            Updated denoiser_ckpt with proj_linear keys filled if needed
++        """
++        if self.image_attn_mode != 'proj':
++            return denoiser_ckpt
++        
++        # Find all per-block proj_linear keys expected by the model
++        proj_linear_keys = [k for k in denoiser_state_dict.keys()
++                            if '.cross_attn.proj_linear.' in k]
++        if not proj_linear_keys:
++            return denoiser_ckpt
++        
++        # --- Phase 1: Handle shape mismatch for existing keys (NAF upgrade) ---
++        for k in proj_linear_keys:
++            if k in denoiser_ckpt:
++                expected_shape = denoiser_state_dict[k].shape
++                actual_shape = denoiser_ckpt[k].shape
++                if expected_shape != actual_shape:
++                    if k.endswith('.weight') and len(expected_shape) == 2:
++                        # Weight shape: [out_features, in_features]
++                        # Old: [model_ch, embed_dim], New: [model_ch, embed_dim*2]
++                        out_f, new_in_f = expected_shape
++                        _, old_in_f = actual_shape
++                        if new_in_f > old_in_f and out_f == actual_shape[0]:
++                            if self.is_master:
++                                print(f'\n  [NAF Compat] Padding proj_linear weight {k}: '
++                                      f'{actual_shape} -> {expected_shape} (zero-pad hr half)')
++                            new_w = torch.zeros(expected_shape, dtype=denoiser_ckpt[k].dtype,
++                                                device=denoiser_ckpt[k].device)
++                            new_w[:, :old_in_f] = denoiser_ckpt[k]
++                            denoiser_ckpt[k] = new_w
++                        else:
++                            if self.is_master:
++                                print(f'\n  Warning: proj_linear {k} shape mismatch '
++                                      f'{actual_shape} vs {expected_shape}, using model init')
++                            denoiser_ckpt[k] = denoiser_state_dict[k]
++                    # bias shape should match (out_features only), no padding needed
++        
++        # --- Phase 2: Handle completely missing keys ---
++        missing_proj_keys = [k for k in proj_linear_keys if k not in denoiser_ckpt]
++        if not missing_proj_keys:
++            return denoiser_ckpt
++        
++        if self.is_master:
++            print(f'\n  [Compat] Denoiser ckpt missing {len(missing_proj_keys)} per-block proj_linear keys.')
++            print(f'           Attempting to load from image_cond proj_linear: {image_cond_ckpt_path}')
++        
++        # Try to find proj_linear weights from image_cond checkpoint
++        old_proj_linear_w = None
++        old_proj_linear_b = None
++        
++        if image_cond_ckpt_path is not None:
++            import os as _os
++            if _os.path.exists(image_cond_ckpt_path):
++                try:
++                    ic_ckpt = torch.load(image_cond_ckpt_path, map_location=self.device, weights_only=True)
++                    old_proj_linear_w = ic_ckpt.get('proj_linear.weight')
++                    old_proj_linear_b = ic_ckpt.get('proj_linear.bias')
++                except Exception as e:
++                    if self.is_master:
++                        print(f'           Warning: Failed to load image_cond ckpt: {e}')
++        
++        if old_proj_linear_w is None:
++            raise RuntimeError(
++                f'Denoiser checkpoint is missing per-block proj_linear keys '
++                f'(e.g. {missing_proj_keys[0]}), and no image_cond proj_linear '
++                f'was found to broadcast from. Cannot proceed.'
++            )
++        
++        if self.is_master:
++            print(f'           Found image_cond proj_linear: weight {old_proj_linear_w.shape}, bias {old_proj_linear_b.shape}')
++            print(f'           Broadcasting to {len(missing_proj_keys)} per-block keys...')
++        
++        for k in missing_proj_keys:
++            if k.endswith('.weight'):
++                expected_shape = denoiser_state_dict[k].shape
++                if expected_shape != old_proj_linear_w.shape:
++                    # Pad for NAF: [model_ch, embed_dim] -> [model_ch, embed_dim*2]
++                    out_f, new_in_f = expected_shape
++                    _, old_in_f = old_proj_linear_w.shape
++                    if new_in_f > old_in_f and out_f == old_proj_linear_w.shape[0]:
++                        new_w = torch.zeros(expected_shape, dtype=old_proj_linear_w.dtype)
++                        new_w[:, :old_in_f] = old_proj_linear_w
++                        denoiser_ckpt[k] = new_w
++                    else:
++                        denoiser_ckpt[k] = denoiser_state_dict[k]
++                else:
++                    denoiser_ckpt[k] = old_proj_linear_w.clone()
++            elif k.endswith('.bias'):
++                denoiser_ckpt[k] = old_proj_linear_b.clone()
++        
++        return denoiser_ckpt
++
++    def _master_params_to_state_dicts(self, master_params):
++        """Override to skip image_cond checkpoint entirely.
++        
++        image_cond model no longer has trainable parameters:
++        - proj_linear has been moved to per-block ProjectAttention in the denoiser
++        - DINOv3 backbone is frozen and loaded from pretrained weights
++        - ProjGrid only contains fixed register_buffers (grid_points, front_view_transform_matrix)
++        So there is nothing worth saving for image_cond.
++        """
++        state_dicts = super()._master_params_to_state_dicts(master_params)
++        state_dicts.pop('image_cond', None)
++        return state_dicts
++
++    def load(self, load_dir, step=0):
++        """
++        Override to handle:
++        1. Old checkpoints that don't have image_cond_step*.pt
++        2. Partial image_cond checkpoints (only proj_linear + proj_grid, no DINOv3 backbone)
++        """
++        import os as _os
++
++        if self.is_master:
++            print(f'\nLoading checkpoint from step {step}...', end='')
++
++        model_ckpts = {}
++        for name, model in self.models.items():
++            ckpt_path = _os.path.join(load_dir, 'ckpts', f'{name}_step{step:07d}.pt')
++
++            if name == 'image_cond':
++                # --- handle missing or partial image_cond checkpoint ---
++                if not _os.path.exists(ckpt_path):
++                    if self.is_master:
++                        print(f'\n  image_cond checkpoint not found at {ckpt_path}, using freshly initialised weights.')
++                    model_ckpts[name] = model.state_dict()
++                    continue
++
++                try:
++                    model_ckpt = torch.load(
++                        read_file_dist(ckpt_path),
++                        map_location=self.device, weights_only=True)
++                except Exception as e:
++                    if self.is_master:
++                        print(f'\n  Failed to load image_cond checkpoint: {e}. Using freshly initialised weights.')
++                    model_ckpts[name] = model.state_dict()
++                    continue
++
++                # Partial ckpt (no backbone) → load with strict=False
++                missing, unexpected = model.load_state_dict(model_ckpt, strict=False)
++                # All missing keys should be the frozen DINOv3 backbone; verify
++                non_backbone_missing = [k for k in missing
++                                        if not k.startswith(self._IMAGE_COND_BACKBONE_PREFIX)]
++                if non_backbone_missing and self.is_master:
++                    print(f'\n  Warning: unexpected missing keys in image_cond ckpt: {non_backbone_missing}')
++                if unexpected and self.is_master:
++                    print(f'\n  Warning: unexpected keys in image_cond ckpt: {unexpected}')
++
++                # Build a full state_dict for master_params sync
++                full_sd = model.state_dict()
++                full_sd.update(model_ckpt)
++                model_ckpts[name] = full_sd
++            else:
++                model_ckpt = torch.load(
++                    read_file_dist(ckpt_path),
++                    map_location=self.device, weights_only=True)
++                # For denoiser: handle old ckpts missing per-block proj_linear
++                if name == 'denoiser':
++                    ic_ckpt_path = _os.path.join(load_dir, 'ckpts', f'image_cond_step{step:07d}.pt')
++                    model_ckpt = self._fill_denoiser_proj_linear_from_image_cond(
++                        model_ckpt, model.state_dict(), ic_ckpt_path)
++                model_ckpts[name] = model_ckpt
++                model.load_state_dict(model_ckpt)
++
++        self._state_dicts_to_master_params(self.master_params, model_ckpts)
++        del model_ckpts
++
++        if self.is_master:
++            for i, ema_rate in enumerate(self.ema_rate):
++                ema_ckpts = {}
++                for name, model in self.models.items():
++                    ema_path = _os.path.join(
++                        load_dir, 'ckpts',
++                        f'{name}_ema{ema_rate}_step{step:07d}.pt')
++                    if name == 'image_cond':
++                        if not _os.path.exists(ema_path):
++                            ema_ckpts[name] = model.state_dict()
++                            continue
++                        try:
++                            ema_ckpt = torch.load(ema_path, map_location=self.device, weights_only=True)
++                        except Exception:
++                            ema_ckpts[name] = model.state_dict()
++                            continue
++                        full_sd = model.state_dict()
++                        full_sd.update(ema_ckpt)
++                        ema_ckpts[name] = full_sd
++                    else:
++                        ema_ckpt = torch.load(ema_path, map_location=self.device, weights_only=True)
++                        if name == 'denoiser':
++                            ic_ema_path = _os.path.join(
++                                load_dir, 'ckpts',
++                                f'image_cond_ema{ema_rate}_step{step:07d}.pt')
++                            ema_ckpt = self._fill_denoiser_proj_linear_from_image_cond(
++                                ema_ckpt, model.state_dict(), ic_ema_path)
++                        ema_ckpts[name] = ema_ckpt
++                self._state_dicts_to_master_params(self.ema_params[i], ema_ckpts)
++                del ema_ckpts
++
++        misc_ckpt = torch.load(
++            read_file_dist(_os.path.join(load_dir, 'ckpts', f'misc_step{step:07d}.pt')),
++            map_location=torch.device('cpu'), weights_only=False)
++        # Optimizer state may mismatch when loading old checkpoints that were
++        # saved before image_cond was added to self.models, or when the number
++        # of trainable parameters changed (e.g. backbone freeze, NAF upgrade).
++        # In that case we skip restoring optimizer state and let it re-initialise.
++        try:
++            self.optimizer.load_state_dict(misc_ckpt['optimizer'])
++            # Verify optimizer state shapes match parameters.
++            # load_state_dict may succeed even when shapes mismatch (keys are
++            # integer indices), causing a crash later in optimizer.step().
++            _shape_ok = True
++            for group in self.optimizer.param_groups:
++                for p in group['params']:
++                    state = self.optimizer.state.get(p)
++                    if state is not None:
++                        for sv in state.values():
++                            if isinstance(sv, torch.Tensor) and sv.shape != () and sv.shape != p.shape:
++                                _shape_ok = False
++                                break
++                    if not _shape_ok:
++                        break
++                if not _shape_ok:
++                    break
++            if not _shape_ok:
++                if self.is_master:
++                    print(f'\n  Warning: optimizer state shape mismatch (likely NAF upgrade). '
++                          f'Optimizer will start fresh.')
++                self.optimizer.state.clear()
++        except (ValueError, RuntimeError) as e:
++            if self.is_master:
++                print(f'\n  Warning: could not load optimizer state ({e}). '
++                      f'Optimizer will start fresh.')
++        self.step = misc_ckpt['step']
++        self.data_sampler.load_state_dict(misc_ckpt['data_sampler'])
++        if self.mix_precision_mode == 'amp' and self.mix_precision_dtype == torch.float16:
++            self.scaler.load_state_dict(misc_ckpt['scaler'])
++        elif self.mix_precision_mode == 'inflat_all' and self.mix_precision_dtype == torch.float16:
++            self.log_scale = misc_ckpt['log_scale']
++        if self.lr_scheduler_config is not None:
++            self.lr_scheduler.load_state_dict(misc_ckpt['lr_scheduler'])
++        if self.elastic_controller_config is not None:
++            self.elastic_controller.load_state_dict(misc_ckpt['elastic_controller'])
++        if self.grad_clip is not None and not isinstance(self.grad_clip, float):
++            self.grad_clip.load_state_dict(misc_ckpt['grad_clip'])
++        del misc_ckpt
++
++        if self.world_size > 1:
++            dist.barrier()
++        if self.is_master:
++            print(' Done.')
++
++        if self.world_size > 1:
++            self.check_ddp()
++
++    def finetune_from(self, finetune_ckpt):
++        """
++        Override to tolerate DINOv3 backbone keys missing from image_cond checkpoint.
++        For image_cond, the checkpoint only stores proj_linear + proj_grid (no backbone),
++        so we treat all backbone keys as allowed-missing.
++        """
++        ALLOWED_MISSING_KEYS = {'rope_phases'}
++
++        if self.is_master:
++            print('\nFinetuning from:')
++            for name, path in finetune_ckpt.items():
++                print(f'  - {name}: {path}')
++
++        model_ckpts = {}
++        for name, model in self.models.items():
++            model_state_dict = model.state_dict()
++            if name in finetune_ckpt:
++                model_ckpt = torch.load(
++                    read_file_dist(finetune_ckpt[name]),
++                    map_location=self.device, weights_only=True)
++
++                model_ckpt = self._remap_checkpoint_keys(model_ckpt, model_state_dict)
++
++                for k, v in model_ckpt.items():
++                    if k not in model_state_dict:
++                        if self.is_master:
++                            print(f'Warning: {k} not found in model_state_dict, skipped.')
++                        model_ckpt[k] = None
++                    elif model_ckpt[k].shape != model_state_dict[k].shape:
++                        # For proj_linear weights, try zero-pad instead of skipping
++                        # This handles NAF upgrade: [model_ch, embed_dim] -> [model_ch, embed_dim*2]
++                        if '.cross_attn.proj_linear.weight' in k and len(model_ckpt[k].shape) == 2:
++                            old_shape = model_ckpt[k].shape
++                            new_shape = model_state_dict[k].shape
++                            if new_shape[0] == old_shape[0] and new_shape[1] > old_shape[1]:
++                                if self.is_master:
++                                    print(f'Info: Zero-padding proj_linear weight {k}: {old_shape} -> {new_shape}')
++                                new_w = torch.zeros(new_shape, dtype=model_ckpt[k].dtype)
++                                new_w[:, :old_shape[1]] = model_ckpt[k]
++                                model_ckpt[k] = new_w
++                            else:
++                                if self.is_master:
++                                    print(f'Warning: {k} shape mismatch, {old_shape} vs {new_shape}, skipped.')
++                                model_ckpt[k] = model_state_dict[k]
++                        else:
++                            if self.is_master:
++                                print(f'Warning: {k} shape mismatch, {model_ckpt[k].shape} vs {model_state_dict[k].shape}, skipped.')
++                            model_ckpt[k] = model_state_dict[k]
++                model_ckpt = {k: v for k, v in model_ckpt.items() if v is not None}
++
++                missing_keys = set(model_state_dict.keys()) - set(model_ckpt.keys())
++
++                # For denoiser: fill per-block proj_linear from image_cond if missing
++                if name == 'denoiser':
++                    ic_path = finetune_ckpt.get('image_cond')
++                    proj_linear_missing = {k for k in missing_keys if '.cross_attn.proj_linear.' in k}
++                    if proj_linear_missing:
++                        model_ckpt = self._fill_denoiser_proj_linear_from_image_cond(
++                            model_ckpt, model_state_dict, ic_path)
++                        # Recalculate missing_keys after filling
++                        missing_keys = set(model_state_dict.keys()) - set(model_ckpt.keys())
++
++                # For image_cond, DINOv3 backbone keys are expected to be missing
++                allowed = set(ALLOWED_MISSING_KEYS)
++                if name == 'image_cond':
++                    backbone_missing = {k for k in missing_keys
++                                        if k.startswith(self._IMAGE_COND_BACKBONE_PREFIX)}
++                    allowed |= backbone_missing
++                    if backbone_missing and self.is_master:
++                        print(f'Info: image_cond: {len(backbone_missing)} DINOv3 backbone keys '
++                              f'not in ckpt (expected, using pretrained weights)')
++                    # Old ckpts may have proj_linear.* which has moved to denoiser blocks
++                    proj_linear_missing = {k for k in missing_keys if k.startswith('proj_linear.')}
++                    allowed |= proj_linear_missing
++
++                unexpected_missing = missing_keys - allowed
++                if unexpected_missing and self.is_master:
++                    print(f'Error: Missing keys in checkpoint: {unexpected_missing}')
++                    raise RuntimeError(f'Missing keys in checkpoint: {unexpected_missing}')
++                if missing_keys & ALLOWED_MISSING_KEYS and self.is_master:
++                    print(f'Info: Using model initialized values for: {missing_keys & ALLOWED_MISSING_KEYS}')
++
++                for k in missing_keys:
++                    model_ckpt[k] = model_state_dict[k]
++
++                model_ckpts[name] = model_ckpt
++                model.load_state_dict(model_ckpt)
++            else:
++                if self.is_master:
++                    print(f'Warning: {name} not found in finetune_ckpt, skipped.')
++                model_ckpts[name] = model_state_dict
++
++        self._state_dicts_to_master_params(self.master_params, model_ckpts)
++        if self.is_master:
++            for i, ema_rate in enumerate(self.ema_rate):
++                self._state_dicts_to_master_params(self.ema_params[i], model_ckpts)
++        del model_ckpts
++
++        if self.world_size > 1:
++            dist.barrier()
++        if self.is_master:
++            print('Done.')
++
++        if self.world_size > 1:
++            self.check_ddp()
++
++    def encode_image_proj(
++        self,
++        image: torch.Tensor,
++        camera_angle_x: Optional[torch.Tensor] = None,
++        distance: Optional[torch.Tensor] = None,
++        mesh_scale: Optional[torch.Tensor] = None,
++        transform_matrix: Optional[torch.Tensor] = None,
++        coords: Optional[torch.Tensor] = None,
++    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
++        """
++        Encode the image with view-aligned projection.
++        
++        Supports both 'proj' mode (DINOv3 only, 2 outputs) and 
++        'gated_proj' mode (DINOv3 + VAE, 3 outputs).
++        """
++        if self.image_cond_model is None:
++            self._init_image_cond_model()
++        
++        outputs = self.image_cond_model(
++            image,
++            camera_angle_x=camera_angle_x,
++            distance=distance,
++            mesh_scale=mesh_scale,
++            transform_matrix=transform_matrix,
++        )
++        
++        is_gated = self.image_attn_mode == 'gated_proj'
++        
++        if is_gated:
++            cond_global, cond_proj_semantic, cond_proj_color = outputs
++        else:
++            cond_global, cond_proj = outputs
++        
++        # If coords provided, extract features at sparse positions
++        if coords is not None:
++            B = cond_global.shape[0]
++            module = getattr(self, '_image_cond_module', self.image_cond_model)
++            grid_res = module.grid_resolution
++            batch_indices = coords[:, 0].long()
++            x_coords = coords[:, 1].long()
++            y_coords = coords[:, 2].long()
++            z_coords = coords[:, 3].long()
++            
++            if is_gated:
++                cond_proj_semantic = cond_proj_semantic.reshape(B, grid_res, grid_res, grid_res, -1)
++                cond_proj_semantic = cond_proj_semantic[batch_indices, x_coords, y_coords, z_coords]
++                cond_proj_color = cond_proj_color.reshape(B, grid_res, grid_res, grid_res, -1)
++                cond_proj_color = cond_proj_color[batch_indices, x_coords, y_coords, z_coords]
++            else:
++                cond_proj = cond_proj.reshape(B, grid_res, grid_res, grid_res, -1)
++                cond_proj = cond_proj[batch_indices, x_coords, y_coords, z_coords]
++        
++        if is_gated:
++            cond = {
++                'global': cond_global,
++                'proj_semantic': cond_proj_semantic,
++                'proj_color': cond_proj_color,
++            }
++            uncond = {
++                'global': torch.zeros_like(cond_global),
++                'proj_semantic': torch.zeros_like(cond_proj_semantic),
++                'proj_color': torch.zeros_like(cond_proj_color),
++            }
++        else:
++            cond = {'global': cond_global, 'proj': cond_proj}
++            uncond = {'global': torch.zeros_like(cond_global), 'proj': torch.zeros_like(cond_proj)}
++        
++        return cond, uncond
++    
++    @torch.no_grad()
++    def encode_image(self, image: Union[torch.Tensor, List[Image.Image]]) -> torch.Tensor:
++        """
++        Encode the image (standard mode without projection).
++        """
++        if self.image_cond_model is None:
++            self._init_image_cond_model()
++        
++        if self.image_attn_mode == 'proj':
++            # For proj mode, return dict
++            global_feat, proj_feat = self.image_cond_model(image)
++            return {'global': global_feat, 'proj': proj_feat}
++        else:
++            # Standard mode
++            features = self.image_cond_model(image)
++            return features
++        
++    def _extract_camera_info(self, kwargs):
++        """
++        Extract camera info from kwargs.
++        
++        Supports two formats:
++        1. 'camera_info' dict: {'camera_angle_x': ..., 'distance': ..., 'mesh_scale': ..., 'transform_matrix': ..., 'coords': ...}
++        2. Flat fields: 'camera_angle_x', 'camera_distance', 'mesh_scale', 'transform_matrix', 'coords' in kwargs
++        
++        Returns:
++            camera_info dict or None if not available
++        """
++        if 'camera_info' in kwargs:
++            return kwargs.pop('camera_info')
++        
++        # Try to extract from flat fields (as returned by ViewImageConditionedMixin)
++        camera_angle_x = kwargs.pop('camera_angle_x', None)
++        camera_distance = kwargs.pop('camera_distance', None)
++        mesh_scale = kwargs.pop('mesh_scale', None)
++        transform_matrix = kwargs.pop('transform_matrix', None)
++        coords = kwargs.pop('coords', None)
++        
++        if camera_angle_x is not None and camera_distance is not None and mesh_scale is not None:
++            return {
++                'camera_angle_x': camera_angle_x,
++                'distance': camera_distance,
++                'mesh_scale': mesh_scale,
++                'transform_matrix': transform_matrix,
++                'coords': coords,
++            }
++        
++        return None
++        
++    def get_cond(self, cond, **kwargs):
++        """Get the conditioning data."""
++        kwargs.pop('view_idx', None)
++        
++        if self.image_attn_mode in ('proj', 'gated_proj'):
++            # Handle projection mode (both standard proj and gated_proj)
++            camera_info = self._extract_camera_info(kwargs)
++            if camera_info is not None:
++                coords = camera_info.get('coords')
++                cond, neg_cond = self.encode_image_proj(
++                    cond,
++                    camera_angle_x=camera_info.get('camera_angle_x'),
++                    distance=camera_info.get('distance'),
++                    mesh_scale=camera_info.get('mesh_scale'),
++                    transform_matrix=camera_info.get('transform_matrix'),
++                    coords=coords,
++                )
++                
++                # For sparse mode (coords provided), handle CFG dropout ourselves
++                if coords is not None and hasattr(self, 'p_uncond') and self.p_uncond > 0:
++                    import numpy as np
++                    B = cond['global'].shape[0]
++                    mask = np.random.rand(B) < self.p_uncond
++                    
++                    global_tensor = cond['global']
++                    global_mask_shape = [B] + [1] * (global_tensor.ndim - 1)
++                    global_mask = torch.tensor(mask, device=global_tensor.device).reshape(global_mask_shape)
++                    cond['global'] = torch.where(global_mask, neg_cond['global'], cond['global'])
++                    
++                    batch_indices = coords[:, 0].long()
++                    # Handle all sparse proj keys (proj, or proj_semantic + proj_color)
++                    for key in list(cond.keys()):
++                        if key.startswith('proj'):
++                            device = cond[key].device
++                            sparse_mask = torch.tensor(mask, device=device)[batch_indices].reshape(-1, 1)
++                            cond[key] = torch.where(sparse_mask, neg_cond[key], cond[key])
++                    
++                    return cond
++                else:
++                    kwargs['neg_cond'] = neg_cond
++            else:
++                cond = self.encode_image(cond)
++                if isinstance(cond, dict) and 'global' in cond:
++                    kwargs['neg_cond'] = {k: torch.zeros_like(v) for k, v in cond.items()}
++                else:
++                    kwargs['neg_cond'] = torch.zeros_like(cond)
++        else:
++            cond = self.encode_image(cond)
++            kwargs['neg_cond'] = torch.zeros_like(cond)
++            
++        cond = super().get_cond(cond, **kwargs)
++        return cond
++    
++    def get_inference_cond(self, cond, **kwargs):
++        """Get the conditioning data for inference."""
++        kwargs.pop('view_idx', None)
++        
++        if self.image_attn_mode in ('proj', 'gated_proj'):
++            camera_info = self._extract_camera_info(kwargs)
++            if camera_info is not None:
++                cond, neg_cond = self.encode_image_proj(
++                    cond,
++                    camera_angle_x=camera_info.get('camera_angle_x'),
++                    distance=camera_info.get('distance'),
++                    mesh_scale=camera_info.get('mesh_scale'),
++                    transform_matrix=camera_info.get('transform_matrix'),
++                    coords=camera_info.get('coords'),
++                )
++                kwargs['neg_cond'] = neg_cond
++            else:
++                cond = self.encode_image(cond)
++                if isinstance(cond, dict) and 'global' in cond:
++                    kwargs['neg_cond'] = {k: torch.zeros_like(v) for k, v in cond.items()}
++                else:
++                    kwargs['neg_cond'] = torch.zeros_like(cond)
++        else:
++            cond = self.encode_image(cond)
++            kwargs['neg_cond'] = torch.zeros_like(cond)
++            
++        cond = super().get_inference_cond(cond, **kwargs)
++        return cond
++
++    def vis_cond(self, cond, **kwargs):
++        """Visualize the conditioning data."""
++        return {'image': {'value': cond, 'type': 'image'}}
++
++    @torch.no_grad()
++    def visualize_projection_test(
++        self,
++        cond: torch.Tensor,
++        save_dir: str,
++        prefix: str = "proj_vis",
++        **kwargs
++    ) -> Optional[List[Image.Image]]:
++        """
++        Visualize projection points on the condition images.
++        
++        This should be called once before training starts to verify the projection is correct.
++        
++        Args:
++            cond: Condition image tensor [B, C, H, W], in [0, 1] range
++            save_dir: Directory to save visualizations
++            prefix: Prefix for saved files
++            **kwargs: Should contain camera_angle_x, camera_distance, mesh_scale, transform_matrix
++            
++        Returns:
++            List of PIL Images with projected points overlaid, or None if not in proj mode
++        """
++        if self.image_attn_mode != 'proj':
++            return None
++            
++        if self.image_cond_model is None:
++            self._init_image_cond_model()
++        
++        # Use _image_cond_module for attribute access (image_cond_model may be DDP-wrapped)
++        module = getattr(self, '_image_cond_module', self.image_cond_model)
++        
++        # Check if the model has visualization capability
++        if not hasattr(module, 'visualize_projection'):
++            print("Warning: image_cond_model does not support visualize_projection")
++            return None
++        
++        # Extract camera info
++        camera_info = self._extract_camera_info(kwargs)
++        if camera_info is None:
++            print("Warning: No camera info available for projection visualization")
++            return None
++        
++        return module.visualize_projection(
++            image=cond,
++            camera_angle_x=camera_info.get('camera_angle_x'),
++            distance=camera_info.get('distance'),
++            mesh_scale=camera_info.get('mesh_scale'),
++            transform_matrix=camera_info.get('transform_matrix'),
++            save_dir=save_dir,
++            prefix=prefix,
++        )
+diff --git a/trellis2_gguf/utils/host_buffers.py b/trellis2_gguf/utils/host_buffers.py
+new file mode 100644
+--- /dev/null
++++ b/trellis2_gguf/utils/host_buffers.py
+@@ -0,0 +1,49 @@
++"""Host staging for inference features on Windows PyTorch.
++
++NumPy owns these buffers so dropping a staged tensor returns large allocations
++to the OS instead of retaining them in the installed torch CPU allocator.
++No precision conversion, resampling, or change to neural features is performed.
++"""
++import os
++
++import numpy as np
++import torch
++
++
++def _check_host_capacity(required):
++    if os.name != 'nt' or required < 32 * 1024 ** 2:
++        return
++    import ctypes
++    from ctypes import wintypes
++    class PerformanceInfo(ctypes.Structure):
++        _fields_ = [('cb', wintypes.DWORD)] + [(name, ctypes.c_size_t) for name in (
++            'CommitTotal', 'CommitLimit', 'CommitPeak', 'PhysicalTotal',
++            'PhysicalAvailable', 'SystemCache', 'KernelTotal', 'KernelPaged',
++            'KernelNonpaged', 'PageSize')] + [(name, wintypes.DWORD) for name in (
++                'HandleCount', 'ProcessCount', 'ThreadCount')]
++    info = PerformanceInfo(cb=ctypes.sizeof(PerformanceInfo))
++    if not ctypes.windll.psapi.GetPerformanceInfo(ctypes.byref(info), info.cb):
++        raise ctypes.WinError()
++    available = (info.CommitLimit - info.CommitTotal) * info.PageSize
++    print(f'[Pixal3D host buffer] commit={info.CommitTotal * info.PageSize / 2**30:.2f}/'
++          f'{info.CommitLimit * info.PageSize / 2**30:.2f} GiB, copy={required / 2**20:.1f} MiB', flush=True)
++    if available < required + 256 * 1024 ** 2:
++        raise MemoryError('系统提交内存余量不足，已停止分配大型特征缓冲区；请释放后台内存后重试。')
++
++
++def copy_features_to_cpu(source):
++    if os.name != 'nt' or source.device.type == 'cpu' or source.dtype != torch.float32:
++        return source.cpu()
++    _check_host_capacity(source.numel() * source.element_size())
++    destination = torch.from_numpy(np.empty(tuple(source.shape), dtype=np.float32))
++    # A blocking copy is required before the source CUDA storage can be released.
++    destination.copy_(source.detach(), non_blocking=False)
++    return destination
++
++
++def cat_features_on_cpu(parts, dim=-1):
++    if (os.name == 'nt' and all(part.device.type == 'cpu' and part.dtype == torch.float32
++                               for part in parts)):
++        _check_host_capacity(sum(part.numel() * part.element_size() for part in parts))
++        return torch.from_numpy(np.concatenate([part.detach().numpy() for part in parts], axis=dim))
++    return torch.cat(parts, dim=dim)

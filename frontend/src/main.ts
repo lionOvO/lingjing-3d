@@ -1,0 +1,22 @@
+import { createApp } from 'vue'
+import { createPinia } from 'pinia'
+import ElementPlus from 'element-plus'
+import 'element-plus/dist/index.css'
+import AppLayout from './layouts/AppLayout.vue'
+import router from './router'
+import './style.css'
+import './styles/dashboard.css'
+import './styles/dashboard-actions.css'
+import './styles/brand.css'
+import './styles/project-detail.css'
+import './styles/studio-shell.css'
+import './styles/studio-pages.css'
+import './styles/studio-wallpaper.css'
+import './styles/product-entry.css'
+import './styles/auth-entry.css'
+import './styles/creation-tools.css'
+
+const app = createApp(AppLayout)
+app.use(createPinia()).use(router).use(ElementPlus).mount('#app')
+import './styles/cloud-home.css'
+import './styles/cloud-world.css'

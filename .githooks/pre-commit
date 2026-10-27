@@ -1,0 +1,5 @@
+#!/bin/sh
+if command -v py >/dev/null 2>&1; then
+  exec py -3 scripts/check_publication.py --staged
+fi
+exec python scripts/check_publication.py --staged

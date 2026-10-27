@@ -1,0 +1,94 @@
+{
+  "6": {
+    "class_type": "Trellis2LoadImageWithTransparency_GGUF",
+    "inputs": {"image": "source.png"}
+  },
+  "39": {
+    "class_type": "Trellis2LoadModel_GGUF",
+    "inputs": {
+      "modelname": "Pixal3D-GGUF",
+      "model_format": "GGUF Q4_K_M",
+      "backend": "flash_attn",
+      "device": "cuda",
+      "low_vram": true,
+      "keep_models_loaded": false
+    }
+  },
+  "55": {
+    "class_type": "Trellis2PreProcessImage_GGUF",
+    "inputs": {
+      "image": ["6", 2],
+      "padding": 25,
+      "remove_background": true
+    }
+  },
+  "45": {
+    "class_type": "Trellis2MeshWithVoxelAdvancedGenerator_GGUF",
+    "inputs": {
+      "pipeline": ["39", 0],
+      "image": ["55", 0],
+      "seed": 109020838,
+      "pipeline_type": "1024_cascade",
+      "sparse_structure_steps": 16,
+      "sparse_structure_guidance_strength": 6.5,
+      "sparse_structure_guidance_rescale": 0.2,
+      "sparse_structure_rescale_t": 4,
+      "shape_steps": 16,
+      "shape_guidance_strength": 7,
+      "shape_guidance_rescale": 0.2,
+      "shape_rescale_t": 4,
+      "texture_steps": 20,
+      "texture_guidance_strength": 3,
+      "texture_guidance_rescale": 0.2,
+      "texture_rescale_t": 3,
+      "max_num_tokens": 49152,
+      "max_views": 2,
+      "sparse_structure_resolution": 32,
+      "generate_texture_slat": true,
+      "sparse_structure_guidance_interval_start": 0.1,
+      "sparse_structure_guidance_interval_end": 1,
+      "shape_guidance_interval_start": 0.1,
+      "shape_guidance_interval_end": 1,
+      "texture_guidance_interval_start": 0,
+      "texture_guidance_interval_end": 0.9,
+      "use_tiled_decoder": true,
+      "sparse_structure_sampler": "euler",
+      "shape_sampler": "euler",
+      "texture_sampler": "euler"
+    }
+  },
+  "54": {
+    "class_type": "Trellis2PostProcessAndUnWrapAndRasterizer_GGUF",
+    "inputs": {
+      "mesh": ["45", 0],
+      "bvh": ["45", 1],
+      "mesh_cluster_threshold_cone_half_angle_rad": 60,
+      "mesh_cluster_refine_iterations": 0,
+      "mesh_cluster_global_iterations": 1,
+      "mesh_cluster_smooth_strength": 1,
+      "texture_size": 1024,
+      "remesh": true,
+      "remesh_band": 1,
+      "remesh_project": 0,
+      "target_face_num": 500000,
+      "simplify_method": "Cumesh",
+      "fill_holes": true,
+      "texture_alpha_mode": "OPAQUE",
+      "dual_contouring_resolution": "1024",
+      "double_side_material": false,
+      "remove_floaters": true,
+      "bake_on_vertices": false,
+      "use_custom_normals": false,
+      "uv_unwrap_method": "Smart",
+      "remove_inner_faces": true
+    }
+  },
+  "19": {
+    "class_type": "Trellis2ExportMesh_GGUF",
+    "inputs": {
+      "trimesh": ["54", 0],
+      "filename_prefix": "Trellis2Project",
+      "file_format": "glb"
+    }
+  }
+}

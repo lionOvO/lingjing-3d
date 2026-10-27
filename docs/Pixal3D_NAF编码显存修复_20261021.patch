@@ -1,0 +1,15 @@
+--- before/trellis2_image_to_3d.py
++++ after/trellis2_image_to_3d.py
+@@ -603,6 +603,12 @@
+ 
+                     if self_instance.use_naf_upsample:
+                         self_instance._load_naf()
++                        # DINO features are complete; its weights must not overlap NAF encoding.
++                        # Load NAF first while DINO still identifies the correct CUDA device.
++                        if self.low_vram:
++                            self_instance.model.cpu()
++                            self._cleanup_cuda()
++                            print('[Pixal3D] DINO offloaded before NAF encoding', flush=True)
+                         lr_features_bchw = z_patchtokens_spatial.permute(0, 3, 1, 2)
+ 
+                         K = getattr(self_instance, 'naf_tile_factor', 1) or 1

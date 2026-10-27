@@ -1,0 +1,290 @@
+{
+  "checked_on": "2026-10-27",
+  "notes": "Remote repository metadata and local file sizes matched; local multi-GB weight SHA256 was not recomputed. Profiles q4 and q8 are alternatives.",
+  "files": [
+    {
+      "local_path": "models/facebook/dinov3-vitl16-pretrain-lvd1689m/model.safetensors",
+      "repo_id": "Aero-Ex/Dinov3",
+      "revision": "33aa61361f167fadf08fa88f312717ba5f482c42",
+      "filename": "facebook/dinov3-vitl16-pretrain-lvd1689m/model.safetensors",
+      "bytes": 1212559808,
+      "sha256": "dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179",
+      "url": "https://huggingface.co/Aero-Ex/Dinov3/resolve/33aa61361f167fadf08fa88f312717ba5f482c42/facebook/dinov3-vitl16-pretrain-lvd1689m/model.safetensors",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/decoder/ss_dec_conv3d_16l8_fp16.safetensors",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "decoder/ss_dec_conv3d_16l8_fp16.safetensors",
+      "bytes": 147591972,
+      "sha256": "1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a",
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/decoder/ss_dec_conv3d_16l8_fp16.safetensors",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/decoder/shape_dec_next_dc_f16c32_fp16.safetensors",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "decoder/shape_dec_next_dc_f16c32_fp16.safetensors",
+      "bytes": 948490494,
+      "sha256": "e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581",
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/decoder/shape_dec_next_dc_f16c32_fp16.safetensors",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/decoder/tex_dec_next_dc_f16c32_fp16.safetensors",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "decoder/tex_dec_next_dc_f16c32_fp16.safetensors",
+      "bytes": 948458812,
+      "sha256": "97ea69addea2ecd9312910f5f548234665eef51c088386180b7cd5b258645e3c",
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/decoder/tex_dec_next_dc_f16c32_fp16.safetensors",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/Sparse/ss_flow_img_dit_1_3B_64_bf16_Q4_K_M.gguf",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "Sparse/ss_flow_img_dit_1_3B_64_bf16_Q4_K_M.gguf",
+      "bytes": 758014720,
+      "sha256": "8227521189ef5a24f01afdf49b7673cfd06a50a592cd8943f620a963d9f1757c",
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/Sparse/ss_flow_img_dit_1_3B_64_bf16_Q4_K_M.gguf",
+      "profile": "q4"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/Sparse/ss_flow_img_dit_1_3B_64_bf16_Q8_0.gguf",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "Sparse/ss_flow_img_dit_1_3B_64_bf16_Q8_0.gguf",
+      "bytes": 1427084032,
+      "sha256": "6551ab0381262db6b2a6a2e351f18f7462583d2b064ca9d0b89e4410ef73f16d",
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/Sparse/ss_flow_img_dit_1_3B_64_bf16_Q8_0.gguf",
+      "profile": "q8"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/shape/slat_flow_img2shape_dit_1_3B_512_bf16_Q4_K_M.gguf",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "shape/slat_flow_img2shape_dit_1_3B_512_bf16_Q4_K_M.gguf",
+      "bytes": 784132704,
+      "sha256": "45affe7302ae4e6ff124c8bea9b21cfe8340b75dea5610a7f1369b302ffbd389",
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/shape/slat_flow_img2shape_dit_1_3B_512_bf16_Q4_K_M.gguf",
+      "profile": "q4"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/shape/slat_flow_img2shape_dit_1_3B_1024_bf16_Q4_K_M.gguf",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "shape/slat_flow_img2shape_dit_1_3B_1024_bf16_Q4_K_M.gguf",
+      "bytes": 784132704,
+      "sha256": "ba25d6d25568c9ae61c93fefea75d68a4235a9b6b7c34ec92064cb9edb002ae1",
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/shape/slat_flow_img2shape_dit_1_3B_1024_bf16_Q4_K_M.gguf",
+      "profile": "q4"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/shape/slat_flow_img2shape_dit_1_3B_512_bf16_Q8_0.gguf",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "shape/slat_flow_img2shape_dit_1_3B_512_bf16_Q8_0.gguf",
+      "bytes": 1476761184,
+      "sha256": "651dc94f65bf8af0ddd1e6c5c266c496f1cd61c03f965acaaf53d92bc6f4912f",
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/shape/slat_flow_img2shape_dit_1_3B_512_bf16_Q8_0.gguf",
+      "profile": "q8"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/shape/slat_flow_img2shape_dit_1_3B_1024_bf16_Q8_0.gguf",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "shape/slat_flow_img2shape_dit_1_3B_1024_bf16_Q8_0.gguf",
+      "bytes": 1476761184,
+      "sha256": "7ce2303bb03fcbb8ec435d76be34dcbe21f1b3d12a673a818855342b6d5652c8",
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/shape/slat_flow_img2shape_dit_1_3B_1024_bf16_Q8_0.gguf",
+      "profile": "q8"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/texture/slat_flow_imgshape2tex_dit_1_3B_1024_bf16_Q4_K_M.gguf",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "texture/slat_flow_imgshape2tex_dit_1_3B_1024_bf16_Q4_K_M.gguf",
+      "bytes": 784231008,
+      "sha256": "5c7ef624c7f4a4874c0e4c775afa11907cad4084f133bf4218f4c558729fee1b",
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/texture/slat_flow_imgshape2tex_dit_1_3B_1024_bf16_Q4_K_M.gguf",
+      "profile": "q4"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/texture/slat_flow_imgshape2tex_dit_1_3B_1024_bf16_Q8_0.gguf",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "texture/slat_flow_imgshape2tex_dit_1_3B_1024_bf16_Q8_0.gguf",
+      "bytes": 1476813408,
+      "sha256": "c827e6f5e4b6078434d8c2d054e37424706de1e5587830d5943121cd4ce2dcd8",
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/texture/slat_flow_imgshape2tex_dit_1_3B_1024_bf16_Q8_0.gguf",
+      "profile": "q8"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/encoders/shape_enc_next_dc_f16c32_fp16.safetensors",
+      "repo_id": "Aero-Ex/Trellis2-GGUF",
+      "revision": "edf81aef93af0823ac8721da3c9cd3c52d539f87",
+      "filename": "encoders/shape_enc_next_dc_f16c32_fp16.safetensors",
+      "bytes": 708797208,
+      "sha256": "f37c5ff5b983b68e9946060000f09bc131f3e84318a2c8b7430a81e4b4636c41",
+      "url": "https://huggingface.co/Aero-Ex/Trellis2-GGUF/resolve/edf81aef93af0823ac8721da3c9cd3c52d539f87/encoders/shape_enc_next_dc_f16c32_fp16.safetensors",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Ruicheng/moge-2-vitl/model.pt",
+      "repo_id": "Ruicheng/moge-2-vitl",
+      "revision": "39c4d5e957afe587e04eec59dc2bcc3be5ecd968",
+      "filename": "model.pt",
+      "bytes": 1305030700,
+      "sha256": "3eefd4abb2102f38f12b2d1992e5ff15e4923e5431c67dd494afe157e0111cd5",
+      "url": "https://huggingface.co/Ruicheng/moge-2-vitl/resolve/39c4d5e957afe587e04eec59dc2bcc3be5ecd968/model.pt",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/Sparse/ss_flow_img_dit_1_3B_64_bf16.json",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "Sparse/ss_flow_img_dit_1_3B_64_bf16.json",
+      "bytes": 503,
+      "sha256": null,
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/Sparse/ss_flow_img_dit_1_3B_64_bf16.json",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/decoder/shape_dec_next_dc_f16c32_fp16.json",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "decoder/shape_dec_next_dc_f16c32_fp16.json",
+      "bytes": 678,
+      "sha256": null,
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/decoder/shape_dec_next_dc_f16c32_fp16.json",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/decoder/ss_dec_conv3d_16l8_fp16.json",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "decoder/ss_dec_conv3d_16l8_fp16.json",
+      "bytes": 245,
+      "sha256": null,
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/decoder/ss_dec_conv3d_16l8_fp16.json",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/decoder/tex_dec_next_dc_f16c32_fp16.json",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "decoder/tex_dec_next_dc_f16c32_fp16.json",
+      "bytes": 705,
+      "sha256": null,
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/decoder/tex_dec_next_dc_f16c32_fp16.json",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/pipeline.json",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "pipeline.json",
+      "bytes": 4068,
+      "sha256": null,
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/pipeline.json",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/shape/slat_flow_img2shape_dit_1_3B_1024_bf16.json",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "shape/slat_flow_img2shape_dit_1_3B_1024_bf16.json",
+      "bytes": 535,
+      "sha256": null,
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/shape/slat_flow_img2shape_dit_1_3B_1024_bf16.json",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/shape/slat_flow_img2shape_dit_1_3B_512_bf16.json",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "shape/slat_flow_img2shape_dit_1_3B_512_bf16.json",
+      "bytes": 535,
+      "sha256": null,
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/shape/slat_flow_img2shape_dit_1_3B_512_bf16.json",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/texture/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.json",
+      "repo_id": "Aero-Ex/Pixal3D-GGUF",
+      "revision": "1c2630e408cde95f7bac9c65028404aa49796065",
+      "filename": "texture/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.json",
+      "bytes": 535,
+      "sha256": null,
+      "url": "https://huggingface.co/Aero-Ex/Pixal3D-GGUF/resolve/1c2630e408cde95f7bac9c65028404aa49796065/texture/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.json",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/encoders/shape_enc_next_dc_f16c32_fp16.json",
+      "repo_id": "Aero-Ex/Trellis2-GGUF",
+      "revision": "edf81aef93af0823ac8721da3c9cd3c52d539f87",
+      "filename": "encoders/shape_enc_next_dc_f16c32_fp16.json",
+      "bytes": 653,
+      "sha256": null,
+      "url": "https://huggingface.co/Aero-Ex/Trellis2-GGUF/resolve/edf81aef93af0823ac8721da3c9cd3c52d539f87/encoders/shape_enc_next_dc_f16c32_fp16.json",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/Pixal3D-GGUF/encoders/tex_enc_next_dc_f16c32_fp16.json",
+      "repo_id": "Aero-Ex/Trellis2-GGUF",
+      "revision": "edf81aef93af0823ac8721da3c9cd3c52d539f87",
+      "filename": "encoders/tex_enc_next_dc_f16c32_fp16.json",
+      "bytes": 676,
+      "sha256": null,
+      "url": "https://huggingface.co/Aero-Ex/Trellis2-GGUF/resolve/edf81aef93af0823ac8721da3c9cd3c52d539f87/encoders/tex_enc_next_dc_f16c32_fp16.json",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/facebook/dinov3-vitl16-pretrain-lvd1689m/config.json",
+      "repo_id": "Aero-Ex/Dinov3",
+      "revision": "33aa61361f167fadf08fa88f312717ba5f482c42",
+      "filename": "facebook/dinov3-vitl16-pretrain-lvd1689m/config.json",
+      "bytes": 745,
+      "sha256": null,
+      "url": "https://huggingface.co/Aero-Ex/Dinov3/resolve/33aa61361f167fadf08fa88f312717ba5f482c42/facebook/dinov3-vitl16-pretrain-lvd1689m/config.json",
+      "profile": "common"
+    },
+    {
+      "local_path": "models/facebook/dinov3-vitl16-pretrain-lvd1689m/preprocessor_config.json",
+      "repo_id": "Aero-Ex/Dinov3",
+      "revision": "33aa61361f167fadf08fa88f312717ba5f482c42",
+      "filename": "facebook/dinov3-vitl16-pretrain-lvd1689m/preprocessor_config.json",
+      "bytes": 585,
+      "sha256": null,
+      "url": "https://huggingface.co/Aero-Ex/Dinov3/resolve/33aa61361f167fadf08fa88f312717ba5f482c42/facebook/dinov3-vitl16-pretrain-lvd1689m/preprocessor_config.json",
+      "profile": "common"
+    }
+  ],
+  "additional_downloads": [
+    {
+      "name": "NAF checkpoint",
+      "url": "https://github.com/valeoai/NAF/releases/download/model/naf_release.pth",
+      "local_path": "%USERPROFILE%/.cache/torch/hub/checkpoints/naf_release.pth",
+      "bytes": 2664431
+    },
+    {
+      "name": "NAF code",
+      "url": "https://github.com/valeoai/NAF"
+    },
+    {
+      "name": "rembg ISNet Anime",
+      "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-anime.onnx",
+      "local_path": "project/models/rembg/isnet-anime.onnx",
+      "bytes": 176069933
+    },
+    {
+      "name": "rembg U2Net",
+      "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx",
+      "local_path": "project/models/rembg/u2net.onnx",
+      "bytes": 175997641
+    }
+  ]
+}

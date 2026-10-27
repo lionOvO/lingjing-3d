@@ -1,0 +1,11 @@
+{
+  "root": "<ABSOLUTE_PROJECT_DIRECTORY>",
+  "project": "lingjing-3d",
+  "compose_override": "docker-compose.local.yml",
+  "comfyui": {
+    "url": "http://127.0.0.1:8188",
+    "root": "<ABSOLUTE_COMFYUI_DIRECTORY>",
+    "python": "<ABSOLUTE_COMFYUI_PYTHON_EXE>",
+    "output_directory": "<ABSOLUTE_PROJECT_DIRECTORY>/tmp/comfy-output"
+  }
+}

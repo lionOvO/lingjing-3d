@@ -1,0 +1,20 @@
+services:
+  api:
+    environment:
+      GENERATION_HTTP_TIMEOUT: 3600
+      GENERATION_SERVICE_RETRIES: 0
+      VISION_ANALYSIS_REQUIRED: "false"
+      DIAGNOSTICS_COMFY_URL: ${TRELLIS_COMFY_URL:-http://host.docker.internal:8188}
+  worker:
+    environment:
+      GENERATION_HTTP_TIMEOUT: 3600
+      GENERATION_SERVICE_RETRIES: 0
+      VISION_ANALYSIS_REQUIRED: "false"
+  trellis:
+    environment:
+      TRELLIS_COMFY_TIMEOUT: 3300
+      TRELLIS_PROVIDER: local_comfyui
+      TRELLIS_COMFY_ENABLED: "true"
+      TRELLIS_HF_SPACE_ENABLED: "false"
+      TRELLIS_COMFY_WORKFLOW: /app/workflow_6gb.json
+      TRELLIS_COMFY_OUTPUT_DIR: /comfy-output

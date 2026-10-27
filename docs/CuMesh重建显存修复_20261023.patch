@@ -1,0 +1,34 @@
+--- cumesh/remeshing.py.before
++++ cumesh/remeshing.py
+@@ -792,13 +792,21 @@
+ 
+     pts_vert = (grid_verts.float() / resolution - 0.5) * scale + center
+     dist_vert, _ = chunked_udf(bvh, pts_vert)
++    # Release completed distance-query buffers before allocating the vertex index.
++    del pts_vert, _
+ 
+     hashmap_vert = _init_hashmap(resolution + 1, 2 * grid_verts.shape[0], device)
++    # Build the identical batch-zero keys without an extra zero-column allocation.
++    vertex_keys = torch.empty((grid_verts.shape[0], 4), dtype=grid_verts.dtype, device=device)
++    vertex_keys[:, 0] = 0
++    vertex_keys[:, 1:] = grid_verts
+     _C.hashmap_insert_3d_idx_as_val_cuda(
+         *hashmap_vert,
+-        torch.cat([torch.zeros_like(grid_verts[:, :1]), grid_verts], dim=1),
++        vertex_keys,
+         resolution + 1, resolution + 1, resolution + 1
+     )
++
++    del vertex_keys
+ 
+     dual_verts, intersected = _C.simple_dual_contour(
+         *hashmap_vert,
+@@ -807,7 +815,7 @@
+         resolution + 1, resolution + 1, resolution + 1
+     )
+ 
+-    del hashmap_vert, grid_verts, pts_vert, dist_vert, _
++    del hashmap_vert, grid_verts, dist_vert
+ 
+     # -------------------------------------------------------------------------
+     # 5. Topology (quads)

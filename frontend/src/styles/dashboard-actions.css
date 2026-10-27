@@ -1,0 +1,46 @@
+/* Dashboard-only refinement for Element Plus text action buttons. */
+.dashboard-page .el-button.text-link {
+  --el-button-hover-text-color: #dce8f6;
+  --el-button-hover-bg-color: rgba(169, 199, 232, 0.12);
+  --el-button-active-text-color: #f4f7ff;
+  --el-button-active-bg-color: rgba(169, 199, 232, 0.2);
+  color: var(--pink);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 8px 10px;
+  transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease, transform 180ms ease;
+}
+
+.dashboard-page .el-button.text-link:hover {
+  color: #dce8f6;
+  background-color: rgba(169, 199, 232, 0.12);
+  border-color: rgba(169, 199, 232, 0.34);
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+
+.dashboard-page .el-button.text-link:active {
+  color: #f4f7ff;
+  background-color: rgba(169, 199, 232, 0.2);
+  transform: translateY(0);
+}
+
+.dashboard-page .el-button.text-link:focus-visible {
+  outline: 2px solid rgba(214, 229, 246, 0.8);
+  outline-offset: 3px;
+}
+
+/* RouterLink keeps the same pill interaction without browser link underlines. */
+.account-actions .text-action,
+.account-actions .text-action:hover,
+.account-actions .text-action:visited,
+.account-actions .text-action:active {
+  text-decoration: none;
+}
+
+.account-actions .primary,
+.account-actions .primary:hover,
+.account-actions .primary:visited,
+.account-actions .primary:active {
+  text-decoration: none;
+}

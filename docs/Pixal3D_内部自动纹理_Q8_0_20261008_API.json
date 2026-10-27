@@ -1,0 +1,76 @@
+{
+  "1": {
+    "class_type": "Trellis2LoadModel_GGUF",
+    "inputs": {
+      "modelname": "Pixal3D-GGUF",
+      "model_format": "GGUF Q8_0",
+      "backend": "flash_attn",
+      "device": "cuda",
+      "low_vram": true,
+      "keep_models_loaded": false
+    }
+  },
+  "2": {
+    "class_type": "Trellis2LoadImageWithTransparency_GGUF",
+    "inputs": {
+      "image": "OIP_clean_1024_rgba.png"
+    }
+  },
+  "3": {
+    "class_type": "Trellis2LoadMesh_GGUF",
+    "inputs": {
+      "glb_path": "E:\\ComfyUI-Easy-Install\\ComfyUI-Easy-Install\\ComfyUI\\output\\Pixal3D_Geometry_512_00001_.glb"
+    }
+  },
+  "4": {
+    "class_type": "Trellis2MeshTexturing_GGUF",
+    "inputs": {
+      "pipeline": [
+        "1",
+        0
+      ],
+      "image": [
+        "2",
+        2
+      ],
+      "trimesh": [
+        "3",
+        0
+      ],
+      "seed": 765536652,
+      "texture_steps": 12,
+      "texture_guidance_strength": 3.0,
+      "texture_guidance_rescale": 0.2,
+      "texture_rescale_t": 3.0,
+      "resolution": "1024",
+      "texture_size": 1024,
+      "texture_alpha_mode": "OPAQUE",
+      "double_side_material": false,
+      "texture_guidance_interval_start": 0.0,
+      "texture_guidance_interval_end": 0.9,
+      "max_views": 1,
+      "bake_on_vertices": false,
+      "use_custom_normals": false,
+      "uv_unwrap_method": "Xatlas",
+      "mesh_cluster_threshold_cone_half_angle_rad": 60.0,
+      "use_tiled_encoder": true,
+      "encoder_tile_size": 512,
+      "encoder_overlap": 32,
+      "use_tiled_decoder_for_texture": true,
+      "decoder_tile_size": 120,
+      "decoder_overlap": 48,
+      "sampler": "euler"
+    }
+  },
+  "5": {
+    "class_type": "Trellis2ExportMesh_GGUF",
+    "inputs": {
+      "trimesh": [
+        "4",
+        0
+      ],
+      "filename_prefix": "Pixal3D_InternalCanonical_Q8_0_20261008",
+      "file_format": "glb"
+    }
+  }
+}

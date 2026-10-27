@@ -1,0 +1,8 @@
+# Reuse cached dependencies and install local Pillow/networkx wheels for GLB tools.
+FROM lingjing-12a65edbb2-api:latest
+USER root
+COPY .runtime-wheels/ /tmp/runtime-wheels/
+RUN pip install --no-index --no-deps /tmp/runtime-wheels/*.whl && rm -rf /tmp/runtime-wheels
+COPY --chown=10001:10001 requirements.txt /app/requirements.txt
+COPY --chown=10001:10001 app/ /app/app/
+USER appuser

@@ -1,0 +1,13 @@
+--- before/nodes.py
++++ after/nodes.py
+@@ -1753,7 +1753,9 @@
+                 grid_size = torch.tensor(grid_size, dtype=torch.int32, device=coords.device)
+             voxel_size = (aabb[1] - aabb[0]) / grid_size
+         
+-        if remove_floaters:
++        # Raw dual-grid fragments can form valid strands after reconstruction.
++        # The remesh branch cleans components after rebuilding their connections.
++        if remove_floaters and not remesh:
+             mesh_copy = MeshUtils.remove_floater(mesh_copy)
+             
+         vertices = mesh_copy.vertices

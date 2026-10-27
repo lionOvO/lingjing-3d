@@ -1,0 +1,13 @@
+<script setup lang="ts">
+import { onUnmounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { ArrowLeft, ShieldCheck, ArrowRight } from 'lucide-vue-next'
+import { useAuthStore } from '../stores/auth'
+import SmsCodeFields from '../components/SmsCodeFields.vue'
+import api from '../services/api'
+const router=useRouter(), auth=useAuthStore(), busy=ref(false), error=ref(''), done=ref(false)
+const form=reactive({phone:'',code:'',password:'',confirm:''})
+async function submit() { if(busy.value) return; error.value=''; if(form.password!==form.confirm) { error.value='两次输入的新密码不一致'; return }; busy.value=true; try { await api.post('/auth/password/reset',{phone:form.phone,code:form.code,password:form.password}); auth.logout(); form.password=''; form.confirm=''; form.code=''; done.value=true } catch(e:any) { error.value=e.message } finally { busy.value=false } }
+onUnmounted(()=>{form.password='';form.confirm='';form.code=''})
+</script>
+<template><section class="page auth-page auth-redesign"><div class="auth-entry-wrap"><RouterLink class="auth-back" to="/auth"><ArrowLeft :size="15" />返回登录</RouterLink><div class="auth-entry-panel"><aside class="auth-story"><div class="auth-story-brand"><ShieldCheck :size="22" />账号安全</div><div class="auth-story-copy"><p>找回你的创作空间</p><h2>灵感和作品，<br />仍在原处等你。</h2><p class="auth-story-description">使用账号绑定的手机号重设密码。<br />你的项目、生成记录和模型资产会保留。</p></div><div class="auth-sculpture"><ShieldCheck :size="110" :stroke-width=".7" /></div><div class="auth-story-footer">验证码 5 分钟有效 · 仅用于本次找回</div></aside><div class="auth-form-panel"><template v-if="done"><div class="auth-form-heading"><p class="auth-form-eyebrow">已完成安全验证</p><h1>密码已重设</h1><p>请用新密码重新登录。其他设备的旧登录状态已失效。</p></div><button class="auth-submit" @click="router.replace('/auth')">返回登录<ArrowRight :size="17" /></button></template><form v-else class="tool-form reset-form" @submit.prevent="submit" :aria-busy="busy"><div class="auth-form-heading"><p class="auth-form-eyebrow">手机验证码找回</p><h1>重设登录密码</h1><p>未绑定手机号的历史账号，请联系平台维护者处理。</p></div><SmsCodeFields v-model:phone="form.phone" v-model:code="form.code" purpose="reset" :disabled="busy" /><label>新密码<input v-model="form.password" class="library-input" required type="password" minlength="8" maxlength="128" autocomplete="new-password" placeholder="设置 8–128 位密码" :disabled="busy" /></label><label>再次输入新密码<input v-model="form.confirm" class="library-input" required type="password" minlength="8" maxlength="128" autocomplete="new-password" :disabled="busy" /></label><p v-if="error" class="library-error" role="alert">{{ error }}</p><button class="auth-submit" :disabled="busy">{{busy?'正在重设…':'验证并重设密码'}}<ArrowRight :size="17" /></button></form></div></div></div></section></template>

@@ -1,0 +1,35 @@
+--- before/trellis2_image_to_3d.py
++++ after/trellis2_image_to_3d.py
+@@ -25,6 +25,13 @@
+ import random
+ 
+ from comfy.utils import ProgressBar
++
++def build_pixal3d_image_cond_model(config: dict):
++    from ..trainers.flow_matching.mixins.image_conditioned_proj import DinoV3ProjFeatureExtractor
++    model = DinoV3ProjFeatureExtractor(**config)
++    model.eval()
++    return model
++
+ 
+ def pil2tensor(image):
+     return torch.from_numpy(np.array(image).astype(np.float32) / 255.0)[None,]
+@@ -407,17 +414,7 @@
+         return camera_config
+ 
+     def _get_build_pixal3d_image_cond_model(self):
+-        import sys
+-        for name, module in list(sys.modules.items()):
+-            if name.startswith('torch.') or name.startswith('torchvision.'): continue
+-            try:
+-                if hasattr(module, 'build_pixal3d_image_cond_model'):
+-                    func = getattr(module, 'build_pixal3d_image_cond_model')
+-                    if callable(func):
+-                        return func
+-            except Exception:
+-                pass
+-        raise ImportError("Could not find build_pixal3d_image_cond_model in loaded modules. Make sure ComfyUI-Trellis2 is updated and installed.")
++        return build_pixal3d_image_cond_model
+ 
+     def get_proj_cond_ss(
+         self,

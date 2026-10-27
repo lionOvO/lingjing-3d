@@ -1,0 +1,463 @@
+--- E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\ComfyUI\custom_nodes\ComfyUI-Trellis2-GGUF\nodes.py.bak-before-mesh-cleanup-20261009
++++ E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\ComfyUI\custom_nodes\ComfyUI-Trellis2-GGUF\nodes.py
+@@ -38,6 +38,8 @@
+ 
+ 
+ import pymeshlab
++from scipy.sparse import coo_matrix
++from scipy.sparse.csgraph import connected_components
+ 
+ import cumesh as CuMesh
+ import o_voxel
+@@ -213,6 +215,55 @@
+         return pil_array
+ 
+ class MeshUtils:
++    @staticmethod
++    def remove_floater_by_edges(vertices, faces, ratio=0.005):
++        """Select by edge-connected face count without a MeshLab geometry copy."""
++        if len(faces) == 0:
++            return vertices[:0].copy(), faces.copy()
++        # Store each unoriented vertex-index edge in one uint64, retaining all
++        # incident faces even when more than two faces share an edge.
++        keys = np.empty((len(faces), 3), dtype=np.uint64)
++        for column, (a, b) in enumerate(((0, 1), (1, 2), (2, 0))):
++            keys[:, column] = np.minimum(faces[:, a], faces[:, b])
++            keys[:, column] <<= np.uint64(32)
++            keys[:, column] |= np.maximum(faces[:, a], faces[:, b]).astype(np.uint64)
++        keys = keys.reshape(-1)
++        order = np.argsort(keys)
++        keys = keys[order]
++        shared = np.flatnonzero(keys[1:] == keys[:-1])
++        del keys
++        first = (order[shared] // 3).astype(np.int32)
++        second = (order[shared + 1] // 3).astype(np.int32)
++        del order, shared
++        graph = coo_matrix((np.ones(len(first), dtype=np.bool_), (first, second)),
++                           shape=(len(faces), len(faces))).tocsr()
++        del first, second
++        _, labels = connected_components(graph, directed=False, return_labels=True)
++        del graph
++        counts = np.bincount(labels)
++        # MeshLab truncates the relative count threshold to an integer and selects
++        # strictly smaller components. Preserve that existing policy.
++        keep = counts[labels] >= int(counts.max() * ratio)
++        del labels, counts
++        new_faces = faces[keep]
++        referenced, inverse = np.unique(new_faces, return_inverse=True)
++        return np.ascontiguousarray(vertices[referenced]), np.ascontiguousarray(inverse.reshape(-1, 3), dtype=faces.dtype)
++
++    @staticmethod
++    def clean_mesh_faces(vertices, faces):
++        # Test exact area in float64 without discarding small but valid triangles.
++        triangles = vertices[faces].astype(np.float64)
++        cross = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
++        valid = np.any(cross != 0, axis=1)
++        faces = faces[valid]
++        # Compare positions without welding split vertices or removing reverse faces.
++        _, position_ids = np.unique(vertices, axis=0, return_inverse=True)
++        keys = position_ids[faces]
++        rotation = keys.argmin(axis=1)
++        keys = np.take_along_axis(keys, (rotation[:, None] + np.arange(3)) % 3, axis=1)
++        _, first = np.unique(keys, axis=0, return_index=True)
++        return np.ascontiguousarray(faces[np.sort(first)])
++
+     @staticmethod
+     def simplify_with_meshlib(vertices, faces, target=1000000):
+         current_faces_num = len(faces)
+@@ -1779,7 +1830,9 @@
+             new_vertices, new_faces = cumesh.read()
+             
+             if remove_floaters:
+-                new_vertices, new_faces = MeshUtils.remove_floater2(new_vertices.cpu().numpy(),new_faces.cpu().numpy())
++                new_vertices, new_faces = MeshUtils.remove_floater_by_edges(new_vertices.cpu().numpy(), new_faces.cpu().numpy())
++                # Reinitialization must not reuse topology from the pre-filter mesh.
++                cumesh.clear_cache()
+                 new_vertices = torch.from_numpy(new_vertices).contiguous().float().cuda()
+                 new_faces = torch.from_numpy(new_faces).contiguous().int().cuda()
+                 cumesh.init(new_vertices, new_faces)                    
+@@ -1797,9 +1850,12 @@
+             print(f"After simplifying: {cumesh.num_vertices} vertices, {cumesh.num_faces} faces")            
+             pbar.update(1)
+             
++        new_vertices, new_faces = cumesh.read()
++        new_vertices = new_vertices.detach().cpu().numpy()
++        new_faces = MeshUtils.clean_mesh_faces(new_vertices, new_faces.detach().cpu().numpy())
++
+         if fill_holes:
+-            new_vertices, new_faces = cumesh.read()
+-            meshlib_mesh = mrmeshnumpy.meshFromFacesVerts(new_faces.detach().clone().cpu().numpy(), new_vertices.detach().clone().cpu().numpy())
++            meshlib_mesh = mrmeshnumpy.meshFromFacesVerts(new_faces, new_vertices)
+             hole_edges = meshlib_mesh.topology.findHoleRepresentiveEdges()
+             holes_filled = 0
+             
+@@ -1837,15 +1893,17 @@
+                             
+                 progress_bar.close()                 
+             
+-            new_vertices = mrmeshnumpy.getNumpyVerts(meshlib_mesh)
+-            new_faces = mrmeshnumpy.getNumpyFaces(meshlib_mesh.topology)
++            new_vertices = mrmeshnumpy.getNumpyVerts(meshlib_mesh).astype(np.float32, copy=False)
++            new_faces = MeshUtils.clean_mesh_faces(new_vertices, mrmeshnumpy.getNumpyFaces(meshlib_mesh.topology))
+ 
+             del meshlib_mesh
+             gc.collect()
+-            
+-            # init replaces geometry but retains CuMesh topology caches.
+-            cumesh.clear_cache()
+-            cumesh.init(torch.from_numpy(new_vertices).float().to(coords.device), torch.from_numpy(new_faces).int().to(coords.device))
++
++        # init replaces geometry but retains CuMesh topology caches.
++        cumesh.clear_cache()
++        cumesh.init(torch.from_numpy(new_vertices).float().to(coords.device), torch.from_numpy(new_faces).int().to(coords.device))
++        cumesh.remove_unreferenced_vertices()
++        cumesh.clear_cache()
+         
+         # --- Branch: Bake On Vertices (skip UV unwrapping and texture creation) ---
+         if bake_on_vertices:
+--- E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\python_embeded\Lib\site-packages\smart_uv\smart_uv.py.bak-before-uv-precision-20261009
++++ E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\python_embeded\Lib\site-packages\smart_uv\smart_uv.py
+@@ -6,9 +6,9 @@
+ 
+ def get_face_normals_and_areas(vertices, faces):
+     """Calculate the normal and area for each face."""
+-    v0 = vertices[faces[:, 0]]
+-    v1 = vertices[faces[:, 1]]
+-    v2 = vertices[faces[:, 2]]
++    v0 = vertices[faces[:, 0]].astype(np.float64)
++    v1 = vertices[faces[:, 1]].astype(np.float64)
++    v2 = vertices[faces[:, 2]].astype(np.float64)
+     
+     # Cross product of edges gives a vector whose magnitude is 2 * area
+     # and whose direction is the normal.
+@@ -18,7 +18,7 @@
+     magnitudes = np.linalg.norm(cross_prod, axis=1)
+     
+     # Avoid division by zero
+-    valid_indices = magnitudes > 1e-8
++    valid_indices = magnitudes > 0
+     
+     areas = np.zeros_like(magnitudes)
+     areas[valid_indices] = magnitudes[valid_indices] * 0.5
+@@ -86,7 +86,7 @@
+     sorted_face_indices = np.argsort(areas)[::-1]
+     seed_idx = -1
+     for idx in sorted_face_indices:
+-        if areas[idx] > 1e-8:
++        if areas[idx] > 0:
+             seed_idx = idx
+             break
+             
+@@ -99,7 +99,7 @@
+     while True:
+         # Loop through all faces and group those within the half-angle limit
+         dots = np.dot(normals, project_normal)
+-        group_mask = (dots > angle_limit_half_cos) & (areas > 1e-8)
++        group_mask = (dots > angle_limit_half_cos) & (areas > 0)
+         tagged[group_mask] = True
+         
+         group_indices = np.where(group_mask)[0]
+@@ -361,7 +361,7 @@
+     print(f"[smart_uv] 1. Finished in {time.time() - t_start:.2f}s")
+     
+     # Ignore zero area faces
+-    valid_face_mask = areas > 1e-8
++    valid_face_mask = areas > 0
+     
+     # 2. Calculate Projection Normals
+     print("[smart_uv] 2. Calculating Projection Normals...")
+@@ -569,7 +569,7 @@
+              
+     # Deduplicate exact matching vertices + UVs to recreate Trimesh split format
+     flat_faces = faces.reshape(-1)
+-    quantized_uvs = (flat_uvs * 1e5).astype(np.int32)
++    quantized_uvs = flat_uvs.view(np.uint32)
+     
+     pack = np.column_stack((flat_faces, quantized_uvs))
+     
+--- E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\python_embeded\Lib\site-packages\cumesh\remeshing.py.bak-before-memory-lifetime-20261009
++++ E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\python_embeded\Lib\site-packages\cumesh\remeshing.py
+@@ -770,6 +770,7 @@
+         coords = (coords.unsqueeze(1) * 2 + OFFSETS.unsqueeze(0)).reshape(-1, 3)
+         coords = torch.unique(coords, dim=0)
+     pbar.close()
++    del pts, dist, _
+     
+     # -------------------------------------------------------------------------
+     # 4. Dual Contouring
+@@ -805,6 +806,8 @@
+         dist_vert - eps,
+         resolution + 1, resolution + 1, resolution + 1
+     )
++
++    del hashmap_vert, grid_verts, pts_vert, dist_vert, _
+ 
+     # -------------------------------------------------------------------------
+     # 5. Topology (quads)
+@@ -840,13 +843,16 @@
+ 
+     quad_indices = torch.cat(quad_list, dim=0)
+     intersected_dir = torch.cat(dir_list, dim=0).int()
++    del quad_list, dir_list, hashmap_vox, coords, intersected, nz
++    del c, v_idx, a_idx, neigh, keys, lookup, mask
+ 
+     # -------------------------------------------------------------------------
+     # 6. Re-index vertices
+     # -------------------------------------------------------------------------
+     print('Re-indexing vertices ...')
+     active = torch.zeros(Nvox, dtype=torch.bool, device=device)
+-    active[quad_indices.flatten()] = True
++    for i in range(0, quad_indices.shape[0], chunk_size):
++        active[quad_indices[i:i + chunk_size].flatten()] = True
+ 
+     vert_map = torch.full((Nvox,), -1, dtype=torch.int32, device=device)
+     vert_map[active] = torch.arange(
+@@ -861,6 +867,7 @@
+         quad_indices[i:end] = vert_map[quad_indices[i:end]]
+ 
+     mesh_vertices = (dual_verts / resolution - 0.5) * scale + center
++    del dual_verts, vert_map, active
+ 
+     # -------------------------------------------------------------------------
+     # 7. 🔥 QUAD-LEVEL INNER / OUTER FILTERING (ULTIMATE FIX)
+@@ -888,11 +895,14 @@
+ 
+         quad_indices = quad_indices[is_outer]
+         intersected_dir = intersected_dir[is_outer]
++        del quad_centers, sdf, is_outer
++    del bvh
+         
+     # Re-index vertices to remove unused ones
+     print('Re-indexing vertices after quad filtering ...')
+     used_verts = torch.zeros(mesh_vertices.shape[0], dtype=torch.bool, device=device)
+-    used_verts[quad_indices.flatten()] = True
++    for i in range(0, quad_indices.shape[0], chunk_size):
++        used_verts[quad_indices[i:i + chunk_size].flatten()] = True
+ 
+     new_vert_idx = torch.full((mesh_vertices.shape[0],), -1, dtype=torch.int32, device=device)
+     new_vert_idx[used_verts] = torch.arange(used_verts.sum(), dtype=torch.int32, device=device)
+@@ -901,7 +911,8 @@
+     # Remap quad indices
+     for i in range(0, quad_indices.shape[0], chunk_size):
+         end = min(i + chunk_size, quad_indices.shape[0])
+-        quad_indices[i:end] = new_vert_idx[quad_indices[i:end]]        
++        quad_indices[i:end] = new_vert_idx[quad_indices[i:end]]
++    del used_verts, new_vert_idx
+ 
+     # -------------------------------------------------------------------------
+     # 8. Triangulation (ONLY outer quads)
+--- E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\ComfyUI\custom_nodes\ComfyUI-Trellis2-GGUF\trellis2_gguf\pipelines\trellis2_image_to_3d.py.bak-before-sparse-projection-20261010
++++ E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\ComfyUI\custom_nodes\ComfyUI-Trellis2-GGUF\trellis2_gguf\pipelines\trellis2_image_to_3d.py
+@@ -556,116 +556,109 @@
+             cam_angle = torch.tensor([camera_angle_x], device=device)
+             dist_tensor = torch.tensor([distance], device=device)
+             scale_tensor = torch.tensor([mesh_scale], device=device)
+-            # monkeypatch the forward of this specific image_cond_model instance
+-            # or its class if it hasn't been monkeypatched yet!
+-            if not hasattr(image_cond_model, '_monkeypatched_for_cpu'):
+-                original_forward = image_cond_model.forward.__func__ if hasattr(image_cond_model.forward, '__func__') else image_cond_model.forward
++            grid_res = image_cond_model.grid_resolution
++            sparse_indices = tuple(coords[:, axis].long().to(device) for axis in range(4))
++            def project_sparse_features(self_instance, image, camera_angle_x=None, distance=None, mesh_scale=None, transform_matrix=None):
+                 
+-                def optimized_forward_instance(self_instance, image, camera_angle_x=None, distance=None, mesh_scale=None, transform_matrix=None):
+-                    if self_instance.grid_resolution < 32:
+-                        return original_forward(self_instance, image, camera_angle_x, distance, mesh_scale, transform_matrix)
++
++                if isinstance(image, torch.Tensor):
++                    assert image.ndim == 4, "Image tensor should be batched (B, C, H, W)"
++                elif isinstance(image, list):
++                    assert all(isinstance(i, Image.Image) for i in image), "Image list should be list of PIL images"
++                    image = [i.resize((self_instance.image_size, self_instance.image_size), Image.LANCZOS) for i in image]
++                    image = [np.array(i.convert('RGB')).astype(np.float32) / 255 for i in image]
++                    image = [torch.from_numpy(i).permute(2, 0, 1).float() for i in image]
++                    image = torch.stack(image).cuda()
++                else:
++                    raise ValueError(f"Unsupported type of image: {type(image)}")
++                
++                B = image.shape[0]
++                
++                if self_instance.use_naf_upsample:
++                    image_for_naf = image.clone()
++                
++                image = self_instance.transform(image)
++                
++                with torch.no_grad():
++                    z = self_instance.extract_features(image)
+                     
+-                    import torch
+-                    import numpy as np
+-                    from PIL import Image
+-
+-                    if isinstance(image, torch.Tensor):
+-                        assert image.ndim == 4, "Image tensor should be batched (B, C, H, W)"
+-                    elif isinstance(image, list):
+-                        assert all(isinstance(i, Image.Image) for i in image), "Image list should be list of PIL images"
+-                        image = [i.resize((self_instance.image_size, self_instance.image_size), Image.LANCZOS) for i in image]
+-                        image = [np.array(i.convert('RGB')).astype(np.float32) / 255 for i in image]
+-                        image = [torch.from_numpy(i).permute(2, 0, 1).float() for i in image]
+-                        image = torch.stack(image).cuda()
++                    z_clstoken = z[:, 0:1]
++                    num_reg = getattr(self_instance.model.config, 'num_register_tokens', 4)
++                    z_regtokens = z[:, 1:1+num_reg]
++                    z_patchtokens = z[:, 1+num_reg:]
++                    
++                    z_patchtokens_spatial = z_patchtokens.reshape(
++                        B, self_instance.patch_number, self_instance.patch_number, -1
++                    )
++                    
++                    if camera_angle_x is None or distance is None or mesh_scale is None:
++                        raise ValueError("camera_angle_x, distance, and mesh_scale must be provided")
++                    
++                    z_proj_lr = self_instance.proj_grid(
++                        z_patchtokens_spatial, 
++                        camera_angle_x, 
++                        distance, 
++                        mesh_scale,
++                        transform_matrix
++                    )
++                    
++                    z_proj_lr = z_proj_lr.reshape(B, grid_res, grid_res, grid_res, -1)[sparse_indices]
++
++                    if self_instance.use_naf_upsample:
++                        self_instance._load_naf()
++                        lr_features_bchw = z_patchtokens_spatial.permute(0, 3, 1, 2)
++
++                        K = getattr(self_instance, 'naf_tile_factor', 1) or 1
++                        if K <= 1:
++                            hr_features = self_instance.naf_model(
++                                image_for_naf, lr_features_bchw, self_instance.naf_target_size
++                            )
++                            z_proj_hr = self_instance.proj_grid(
++                                hr_features,
++                                camera_angle_x,
++                                distance,
++                                mesh_scale,
++                                transform_matrix,
++                                BHWC=False
++                            )
++                            del hr_features
++                        else:
++                            z_proj_hr = self_instance._proj_naf_tiled(
++                                image_for_naf, lr_features_bchw,
++                                camera_angle_x, distance, mesh_scale, transform_matrix,
++                                tile_factor=int(K),
++                            )
++
++                        z_proj_hr = z_proj_hr.reshape(B, grid_res, grid_res, grid_res, -1)[sparse_indices]
++                        z_proj_lr_cpu = z_proj_lr.cpu()
++                        z_proj_hr_cpu = z_proj_hr.cpu()
++                        del z_proj_lr, z_proj_hr
++                        torch.cuda.empty_cache()
++                        z_proj = torch.cat([z_proj_lr_cpu, z_proj_hr_cpu], dim=-1)
+                     else:
+-                        raise ValueError(f"Unsupported type of image: {type(image)}")
++                        z_proj = z_proj_lr.cpu()
++                        del z_proj_lr
++                        torch.cuda.empty_cache()
+                     
+-                    B = image.shape[0]
+-                    
+-                    if self_instance.use_naf_upsample:
+-                        image_for_naf = image.clone()
+-                    
+-                    image = self_instance.transform(image)
+-                    
+-                    with torch.no_grad():
+-                        z = self_instance.extract_features(image)
+-                        
+-                        z_clstoken = z[:, 0:1]
+-                        num_reg = getattr(self_instance.model.config, 'num_register_tokens', 4)
+-                        z_regtokens = z[:, 1:1+num_reg]
+-                        z_patchtokens = z[:, 1+num_reg:]
+-                        
+-                        z_patchtokens_spatial = z_patchtokens.reshape(
+-                            B, self_instance.patch_number, self_instance.patch_number, -1
+-                        )
+-                        
+-                        if camera_angle_x is None or distance is None or mesh_scale is None:
+-                            raise ValueError("camera_angle_x, distance, and mesh_scale must be provided")
+-                        
+-                        z_proj_lr = self_instance.proj_grid(
+-                            z_patchtokens_spatial, 
+-                            camera_angle_x, 
+-                            distance, 
+-                            mesh_scale,
+-                            transform_matrix
+-                        )
+-                        
+-                        if self_instance.use_naf_upsample:
+-                            self_instance._load_naf()
+-                            lr_features_bchw = z_patchtokens_spatial.permute(0, 3, 1, 2)
+-
+-                            K = getattr(self_instance, 'naf_tile_factor', 1) or 1
+-                            if K <= 1:
+-                                hr_features = self_instance.naf_model(
+-                                    image_for_naf, lr_features_bchw, self_instance.naf_target_size
+-                                )
+-                                z_proj_hr = self_instance.proj_grid(
+-                                    hr_features,
+-                                    camera_angle_x,
+-                                    distance,
+-                                    mesh_scale,
+-                                    transform_matrix,
+-                                    BHWC=False
+-                                )
+-                                del hr_features
+-                            else:
+-                                z_proj_hr = self_instance._proj_naf_tiled(
+-                                    image_for_naf, lr_features_bchw,
+-                                    camera_angle_x, distance, mesh_scale, transform_matrix,
+-                                    tile_factor=int(K),
+-                                )
+-
+-                            z_proj_lr_cpu = z_proj_lr.cpu()
+-                            z_proj_hr_cpu = z_proj_hr.cpu()
+-                            del z_proj_lr, z_proj_hr
+-                            torch.cuda.empty_cache()
+-                            z_proj = torch.cat([z_proj_lr_cpu, z_proj_hr_cpu], dim=-1)
+-                        else:
+-                            z_proj = z_proj_lr.cpu()
+-                            del z_proj_lr
+-                            torch.cuda.empty_cache()
+-                        
+-                        global_features = torch.cat([z_clstoken, z_regtokens], dim=1)
+-                        return global_features, z_proj
+-
+-                import types
+-                image_cond_model.forward = types.MethodType(optimized_forward_instance, image_cond_model)
+-                image_cond_model._monkeypatched_for_cpu = True
+-                print("[Trellis2-GGUF] Successfully applied instance monkeypatch to image_cond_model!")
++                    global_features = torch.cat([z_clstoken, z_regtokens], dim=1)
++                    return global_features, z_proj
++
+ 
+             with hide_src_module():
+-                z_global, z_proj = image_cond_model(
+-                    image, camera_angle_x=cam_angle, distance=dist_tensor, mesh_scale=scale_tensor,
+-                )
+-            grid_res = image_cond_model.grid_resolution
+-            z_proj_grid = z_proj.reshape(B, grid_res, grid_res, grid_res, -1)
+-            batch_indices = coords[:, 0].long().to(z_proj.device)
+-            x_coords = coords[:, 1].long().to(z_proj.device)
+-            y_coords = coords[:, 2].long().to(z_proj.device)
+-            z_coords = coords[:, 3].long().to(z_proj.device)
+-            z_proj_sparse = z_proj_grid[batch_indices, x_coords, y_coords, z_coords].to(device)
++                if grid_res >= 32:
++                    z_global, z_proj_sparse = project_sparse_features(
++                        image_cond_model, image, camera_angle_x=cam_angle,
++                        distance=dist_tensor, mesh_scale=scale_tensor,
++                    )
++                    z_proj_sparse = z_proj_sparse.to(device)
++                else:
++                    z_global, z_proj = image_cond_model(
++                        image, camera_angle_x=cam_angle, distance=dist_tensor, mesh_scale=scale_tensor,
++                    )
++                    indices = tuple(index.to(z_proj.device) for index in sparse_indices)
++                    z_proj_sparse = z_proj.reshape(B, grid_res, grid_res, grid_res, -1)[indices].to(device)
++                    del z_proj
+             z_proj_st = SparseTensor(feats=z_proj_sparse, coords=coords)
+-            del z_proj_grid, z_proj
+             torch.cuda.empty_cache()
+ 
+             return {

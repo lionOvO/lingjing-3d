@@ -1,0 +1,408 @@
+--- a/nodes.py
++++ b/nodes.py
+@@ -1656,10 +1656,13 @@
+ 
+     def process(self, mesh, mesh_cluster_threshold_cone_half_angle_rad, mesh_cluster_refine_iterations, mesh_cluster_global_iterations, mesh_cluster_smooth_strength, texture_size, remesh, remesh_band, remesh_project, target_face_num, simplify_method, fill_holes, texture_alpha_mode, dual_contouring_resolution, double_side_material, remove_floaters, bake_on_vertices,use_custom_normals,uv_unwrap_method,bvh,remove_inner_faces):
+         pbar = ProgressBar(5 if not bake_on_vertices else 4)
++        coordinate_system = getattr(mesh, 'coordinate_system', 'z_up')
+ 
+         if mesh.attrs is None or mesh.coords is None:
+-            vertices = mesh.vertices.detach().cpu().numpy() if torch.is_tensor(mesh.vertices) else np.asarray(mesh.vertices)
++            vertices = mesh.vertices.detach().cpu().numpy().copy() if torch.is_tensor(mesh.vertices) else np.array(mesh.vertices, copy=True)
+             faces = mesh.faces.detach().cpu().numpy() if torch.is_tensor(mesh.faces) else np.asarray(mesh.faces)
++            if coordinate_system == 'z_up':
++                vertices[:, 1], vertices[:, 2] = vertices[:, 2].copy(), -vertices[:, 1].copy()
+             trimesh = Trimesh.Trimesh(vertices=vertices, faces=faces.astype(np.int64, copy=False), process=False)
+             empty_texture = ImageUtils.pil_to_tensor(Image.new("RGBA", (1, 1), (0, 0, 0, 0)))
+             return (trimesh, empty_texture, empty_texture)
+@@ -1840,6 +1843,8 @@
+             del meshlib_mesh
+             gc.collect()
+             
++            # init replaces geometry but retains CuMesh topology caches.
++            cumesh.clear_cache()
+             cumesh.init(torch.from_numpy(new_vertices).float().to(coords.device), torch.from_numpy(new_faces).int().to(coords.device))
+         
+         # --- Branch: Bake On Vertices (skip UV unwrapping and texture creation) ---
+@@ -1899,9 +1904,9 @@
+             faces_np = out_faces.cpu().numpy()
+             normals_np = out_normals.cpu().numpy()
+             
+-            # Swap Y and Z axes, invert Y (common conversion for GLB compatibility)
+-            vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2].copy(), -vertices_np[:, 1].copy()
+-            normals_np[:, 1], normals_np[:, 2] = normals_np[:, 2].copy(), -normals_np[:, 1].copy()
++            if coordinate_system == 'z_up':
++                vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2].copy(), -vertices_np[:, 1].copy()
++                normals_np[:, 1], normals_np[:, 2] = normals_np[:, 2].copy(), -normals_np[:, 1].copy()
+             
+             # Create mesh with vertex colors using ColorVisuals
+             if use_custom_normals:
+@@ -2014,25 +2019,29 @@
+         
+         # Interpolate 3D positions in UV space (finding 3D coord for every texel)
+         pos = dr.interpolate(out_vertices.unsqueeze(0), rast, out_faces_int32)[0][0]
+-        valid_pos = pos[mask]
+-        
+-        # Map these positions back to the *original* high-res mesh to get accurate attributes
+-        # This corrects geometric errors introduced by simplification/remeshing
+-        _, face_id, uvw = bvh.unsigned_distance(valid_pos, return_uvw=True)
+-        orig_tri_verts = bvh.vertices[bvh.faces[face_id.long()]] # (N_new, 3, 3)
+-        valid_pos = (orig_tri_verts * uvw.unsqueeze(-1)).sum(dim=1)        
+-        
+-        torch.cuda.synchronize()
+-        
+-        # Trilinear sampling from the attribute volume (Color, Material props)
+-        attrs = torch.zeros(texture_size, texture_size, attr_volume.shape[1], device='cuda')
+-        attrs[mask] = grid_sample_3d(
+-            attr_volume,
+-            torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1),
+-            shape=torch.Size([1, attr_volume.shape[1], *grid_size.tolist()]),
+-            grid=((valid_pos - aabb[0]) / voxel_size).reshape(1, -1, 3),
+-            mode='trilinear',
+-        )
++        # Sample an occupancy channel too: black material is valid texture data.
++        sample_volume = torch.cat([attr_volume, torch.ones_like(attr_volume[:, :1])], dim=-1)
++        sample_coords = torch.cat([torch.zeros_like(coords[:, :1]), coords], dim=-1)
++        attrs = torch.zeros(texture_size, texture_size, attr_volume.shape[1], device=pos.device)
++        sample_valid = torch.zeros(texture_size, texture_size, dtype=torch.bool, device=pos.device)
++        active_pixels = mask.reshape(-1).nonzero().flatten()
++        flat_pos = pos.reshape(-1, 3)
++        flat_attrs = attrs.reshape(-1, attr_volume.shape[1])
++        for start in range(0, active_pixels.numel(), 262144):
++            active = active_pixels[start:start + 262144]
++            _, face_id, uvw = bvh.unsigned_distance(flat_pos[active], return_uvw=True)
++            orig_tri_verts = bvh.vertices[bvh.faces[face_id.long()]]
++            mapped_pos = (orig_tri_verts * uvw.unsqueeze(-1)).sum(dim=1)
++            sampled = grid_sample_3d(
++                sample_volume,
++                sample_coords,
++                shape=torch.Size([1, sample_volume.shape[1], *grid_size.tolist()]),
++                grid=((mapped_pos - aabb[0]) / voxel_size).reshape(1, -1, 3),
++                mode='trilinear',
++            ).reshape(-1, sample_volume.shape[1])
++            flat_attrs[active] = sampled[:, :-1]
++            sample_valid.reshape(-1)[active] = sampled[:, -1] > 0
++        del sample_volume, sample_coords, flat_pos, pos
+         
+         # --- Texture Post-Processing & Material Construction ---
+         print("Finalizing mesh...")
+@@ -2050,15 +2059,12 @@
+         # Inpainting: fill gaps (dilation) to prevent black seams at UV boundaries
+         mask_inv = (~mask).astype(np.uint8)
+         
+-        # Also inpaint interior black patches caused by mesh surface points landing in
+-        # gaps between sparse texture voxels (grid_sample_3d returns zero at those spots).
+-        # Detect zero-valued pixels within the mesh boundary and add them to the inpaint mask.
+-        interior_black = (mask & (base_color.max(axis=-1) < 5)).astype(np.uint8)
+-        combined_mask = np.maximum(mask_inv, interior_black)
++        missing_samples = (mask & ~sample_valid.cpu().numpy()).astype(np.uint8)
++        combined_mask = np.maximum(mask_inv, missing_samples)
+         
+         print(f"[Trellis2 Bake] Inpainting: {mask_inv.sum()} boundary pixels + "
+-              f"{interior_black.sum()} interior black patches "
+-              f"({interior_black.sum() * 100 / max(mask.sum(), 1):.1f}% of mesh surface)")
++              f"{missing_samples.sum()} missing voxel samples "
++              f"({missing_samples.sum() * 100 / max(mask.sum(), 1):.1f}% of mesh surface)")
+         
+         base_color = cv2.inpaint(base_color, combined_mask, 3, cv2.INPAINT_TELEA)
+         metallic = cv2.inpaint(metallic, combined_mask, 3, cv2.INPAINT_TELEA)[..., None]
+@@ -2084,9 +2090,9 @@
+         uvs_np = out_uvs.cpu().numpy()
+         normals_np = out_normals.cpu().numpy()
+         
+-        # Swap Y and Z axes, invert Y (common conversion for GLB compatibility)
+-        vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2].copy(), -vertices_np[:, 1].copy()
+-        normals_np[:, 1], normals_np[:, 2] = normals_np[:, 2].copy(), -normals_np[:, 1].copy()
++        if coordinate_system == 'z_up':
++            vertices_np[:, 1], vertices_np[:, 2] = vertices_np[:, 2].copy(), -vertices_np[:, 1].copy()
++            normals_np[:, 1], normals_np[:, 2] = normals_np[:, 2].copy(), -normals_np[:, 1].copy()
+         uvs_np[:, 1] = 1 - uvs_np[:, 1] # Flip UV V-coordinate
+         
+         if use_custom_normals:
+--- a/trellis2_gguf/representations/mesh/base.py
++++ b/trellis2_gguf/representations/mesh/base.py
+@@ -250,6 +250,7 @@
+         attrs: torch.Tensor,
+         voxel_shape: torch.Size,
+         layout: Dict = {},
++        coordinate_system: str = 'z_up',
+     ):
+         self.vertices = vertices.float()
+         self.faces = faces.int()
+@@ -259,6 +260,7 @@
+         self.attrs = attrs
+         self.voxel_shape = voxel_shape
+         self.layout = layout
++        self.coordinate_system = coordinate_system
+ 
+     def to(self, device, non_blocking=False):
+         return MeshWithVoxel(
+@@ -270,6 +272,7 @@
+             self.attrs.to(device, non_blocking=non_blocking) if self.attrs is not None else None,
+             self.voxel_shape,
+             self.layout,
++            self.coordinate_system,
+         )
+         
+     def query_attrs(self, xyz):
+--- a/trellis2_gguf/pipelines/trellis2_image_to_3d.py
++++ b/trellis2_gguf/pipelines/trellis2_image_to_3d.py
+@@ -1173,6 +1173,7 @@
+         dino_foundation_cap: float = 0.92,
+         proj_image_cond_model=None,
+         proj_images=None,
++        proj_grid_resolution: int = None,
+         **kwargs,
+     ) -> SparseTensor:
+         """
+@@ -1189,7 +1190,7 @@
+         coords_dev = coords.to(self.device)
+         # Rebuild proj cond with coords if proj model is provided
+         if proj_image_cond_model is not None and proj_images is not None:
+-            grid_res = int(coords[:, 1:].max().item()) + 1
++            grid_res = proj_grid_resolution if proj_grid_resolution is not None else proj_image_cond_model.grid_resolution
+             cond = self.get_proj_cond_shape(proj_image_cond_model, proj_images, coords,
+                                             grid_resolution_override=grid_res)
+         # Sample structured latent
+@@ -1330,7 +1331,7 @@
+             self._cleanup_cuda()
+         # Rebuild proj cond with HR coords if proj model is provided
+         if proj_image_cond_model is not None and proj_images is not None:
+-            hr_grid_res = int(coords[:, 1:].max().item()) + 1
++            hr_grid_res = hr_resolution // 16
+             cond = self.get_proj_cond_shape(proj_image_cond_model, proj_images, coords,
+                                             grid_resolution_override=hr_grid_res)
+             if self.low_vram:
+@@ -1417,6 +1418,7 @@
+         proj_image_cond_model=None,
+         proj_images=None,
+         fixed_mesh_projection: bool = False,
++        proj_grid_resolution: int = None,
+         **kwargs,
+     ) -> SparseTensor:
+         """
+@@ -1432,7 +1434,7 @@
+         # Rebuild proj cond with shape_slat coords if proj model provided
+         if proj_image_cond_model is not None and proj_images is not None:
+             tex_coords = shape_slat.coords.cpu()
+-            tex_grid_res = int(tex_coords[:, 1:].max().item()) + 1
++            tex_grid_res = proj_grid_resolution if proj_grid_resolution is not None else proj_image_cond_model.grid_resolution
+             cond = self.get_proj_cond_shape(proj_image_cond_model, proj_images, tex_coords,
+                                             grid_resolution_override=tex_grid_res,
+                                             fixed_mesh_projection=fixed_mesh_projection)
+@@ -1586,7 +1588,8 @@
+                         coords = None,
+                         attrs = None,
+                         voxel_shape = None,
+-                        layout=self.pbr_attr_layout
++                        layout=self.pbr_attr_layout,
++                        coordinate_system='y_up' if self.isPixal3D else 'z_up',
+                     )
+                 )
+             return out_mesh
+@@ -1605,7 +1608,8 @@
+                         coords = v.coords[:, 1:],
+                         attrs = v.feats.float(),
+                         voxel_shape = torch.Size([*v.shape, *v.spatial_shape]),
+-                        layout=self.pbr_attr_layout
++                        layout=self.pbr_attr_layout,
++                        coordinate_system='y_up' if self.isPixal3D else 'z_up',
+                     )
+                 )
+             return out_mesh
+@@ -1676,6 +1680,9 @@
+         # else:
+             # raise ValueError(f"Invalid pipeline type: {pipeline_type}")
+         
++        if pipeline_type == '512' and generate_texture_slat and 'tex_slat_flow_model_512' not in self._pretrained_args['models']:
++            raise ValueError("This model has no 512 texture checkpoint. Use 1024_cascade for textured generation, or disable generate_texture_slat for 512 geometry only.")
++
+         # Accept either a single PIL image or a list of PIL images (multi-view)
+         if isinstance(image, (list, tuple)):
+             images = list(image)
+@@ -1724,6 +1731,7 @@
+         
+         if not self.keep_models_loaded:
+             self.unload_sparse_structure_model()
++            ss_model = None
+         
+         # Sampling Shape
+         # Build proj conds for shape/tex stages if needed (Pixal3D models require proj conditioning)
+@@ -1732,7 +1740,7 @@
+         tex_1024_model = None
+         if ss_attn_mode == 'proj':
+             # coords are in sparse_structure_resolution space; proj grid must match
+-            coords_grid_res = int(coords[:, 1:].max().item()) + 1
++            coords_grid_res = sparse_structure_resolution
+             shape_512_model = self.load_pixal3d_image_cond_shape_512()
+             cond_512 = self.get_proj_cond_shape(shape_512_model, images, coords,
+                                                 grid_resolution_override=coords_grid_res)
+@@ -1751,6 +1759,7 @@
+                 sampler=shape_sampler or sampler,
+                 proj_image_cond_model=shape_512_model if ss_attn_mode == 'proj' else None,
+                 proj_images=images if ss_attn_mode == 'proj' else None,
++                proj_grid_resolution=sparse_structure_resolution,
+             )
+             
+             if pbar is not None:
+@@ -1768,6 +1777,7 @@
+                     sampler=tex_sampler or sampler,
+                     proj_image_cond_model=shape_512_model if ss_attn_mode == 'proj' else None,
+                     proj_images=images if ss_attn_mode == 'proj' else None,
++                    proj_grid_resolution=sparse_structure_resolution,
+                 )
+                 
+                 if pbar is not None:
+@@ -1786,6 +1796,7 @@
+                 sampler=shape_sampler or sampler,
+                 proj_image_cond_model=shape_1024_model if ss_attn_mode == 'proj' else None,
+                 proj_images=images if ss_attn_mode == 'proj' else None,
++                proj_grid_resolution=sparse_structure_resolution,
+             )
+             
+             if pbar is not None:
+@@ -1802,6 +1813,7 @@
+                     shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                     proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                     proj_images=images if ss_attn_mode == 'proj' else None,
++                    proj_grid_resolution=sparse_structure_resolution,
+                 )
+                 
+                 if pbar is not None:
+@@ -1836,6 +1848,7 @@
+                 self.unload_pixal3d_image_cond_ss()
+                 self.unload_pixal3d_image_cond_shape_512()
+                 self.unload_pixal3d_image_cond_shape_1024()
++                shape_512_model = shape_1024_model = proj_cond_model = None
+                 self._cleanup_cuda()
+ 
+             if generate_texture_slat:
+@@ -1846,6 +1859,7 @@
+                     shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                     proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                     proj_images=images if ss_attn_mode == 'proj' else None,
++                    proj_grid_resolution=res // 16,
+                 )
+                 
+             if pbar is not None:
+@@ -1882,6 +1896,7 @@
+                     shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                     proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                     proj_images=images if ss_attn_mode == 'proj' else None,
++                    proj_grid_resolution=res // 16,
+                 )
+                 
+                 if pbar is not None:
+@@ -1918,6 +1933,7 @@
+                     shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                     proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                     proj_images=images if ss_attn_mode == 'proj' else None,
++                    proj_grid_resolution=res // 16,
+                 )
+                         
+                 if pbar is not None:
+@@ -1954,6 +1970,7 @@
+                     shape_slat, tex_slat_sampler_params, sampler=tex_sampler or sampler,
+                     proj_image_cond_model=tex_1024_model if ss_attn_mode == 'proj' else None,
+                     proj_images=images if ss_attn_mode == 'proj' else None,
++                    proj_grid_resolution=res // 16,
+                 )
+                 
+                 if pbar is not None:
+@@ -1968,6 +1985,11 @@
+             self.unload_pixal3d_image_cond_shape_512()
+             self.unload_pixal3d_image_cond_shape_1024()
+             self.unload_pixal3d_image_cond_tex_1024()
++        if not self.keep_models_loaded:
++            # Drop local owners before collecting unloaded conditioner models.
++            shape_512_model = shape_1024_model = tex_1024_model = proj_cond_model = None
++            cond_512 = cond_1024 = None
++            self._cleanup_cuda()
+         torch.cuda.empty_cache()
+         if generate_texture_slat:
+             out_mesh = self.decode_latent(shape_slat, tex_slat, res, use_tiled=use_tiled)
+@@ -2721,6 +2743,7 @@
+         dino_foundation_cap: float = 0.92,
+         proj_image_cond_model=None,
+         proj_images=None,
++        proj_grid_resolution: int = None,
+         **kwargs,
+     ) -> SparseTensor:
+         """
+@@ -2736,7 +2759,7 @@
+         # Rebuild proj cond with shape_slat coords if proj model provided
+         if proj_image_cond_model is not None and proj_images is not None:
+             tex_coords = shape_slat.coords.cpu()
+-            tex_grid_res = int(tex_coords[:, 1:].max().item()) + 1
++            tex_grid_res = proj_grid_resolution if proj_grid_resolution is not None else proj_image_cond_model.grid_resolution
+             cond = self.get_proj_cond_shape(proj_image_cond_model, proj_images, tex_coords,
+                                             grid_resolution_override=tex_grid_res)
+         # Sample structured latent
+@@ -2870,7 +2893,8 @@
+                 self.load_tex_slat_flow_model_1024()
+                 tex_slat = self.sample_tex_slat_advanced(
+                     cond_1024, self.models['tex_slat_flow_model_1024'],
+-                    shape_slat, tex_slat_sampler_params, tex_sampler
++                    shape_slat, tex_slat_sampler_params, tex_sampler,
++                    proj_grid_resolution=res // 16,
+                 )
+                 
+             if pbar is not None:
+@@ -2903,7 +2927,8 @@
+                 self.load_tex_slat_flow_model_1024()
+                 tex_slat = self.sample_tex_slat_advanced(
+                     cond_1024, self.models['tex_slat_flow_model_1024'],
+-                    shape_slat, tex_slat_sampler_params, tex_sampler
++                    shape_slat, tex_slat_sampler_params, tex_sampler,
++                    proj_grid_resolution=res // 16,
+                 )
+                 
+             if pbar is not None:
+@@ -3375,7 +3400,8 @@
+             tex_slat = self.sample_tex_slat(
+                 cond, tex_model,
+                 shape_slat, tex_slat_sampler_params,
+-                sampler=sampler
++                sampler=sampler,
++                proj_grid_resolution=resolution // 16,
+             )
+             
+             if not self.keep_models_loaded:
+@@ -3393,6 +3419,7 @@
+                 proj_image_cond_model=tex_1024_model,
+                 proj_images=images if tex_attn_mode == 'proj' else None,
+                 fixed_mesh_projection=True,
++                proj_grid_resolution=resolution // 16,
+             )
+ 
+             if not self.keep_models_loaded:
+@@ -3750,7 +3777,8 @@
+                 tex_slat = self.sample_tex_slat(
+                     cond, self.models['tex_slat_flow_model_512'],
+                     shape_slat, tex_slat_sampler_params,
+-                    sampler=sampler
++                    sampler=sampler,
++                    proj_grid_resolution=resolution // 16,
+                 )
+             
+             if not self.keep_models_loaded:
+@@ -3780,7 +3808,8 @@
+                 self.load_tex_slat_flow_model_1024()
+                 tex_slat = self.sample_tex_slat(
+                     cond, self.models['tex_slat_flow_model_1024'],
+-                    shape_slat, tex_slat_sampler_params, sampler=sampler
++                    shape_slat, tex_slat_sampler_params, sampler=sampler,
++                    proj_grid_resolution=resolution // 16,
+                 )
+             
+             if not self.keep_models_loaded:
+@@ -3810,7 +3839,8 @@
+                 self.load_tex_slat_flow_model_1024()
+                 tex_slat = self.sample_tex_slat(
+                     cond, self.models['tex_slat_flow_model_1024'],
+-                    shape_slat, tex_slat_sampler_params, sampler=sampler
++                    shape_slat, tex_slat_sampler_params, sampler=sampler,
++                    proj_grid_resolution=resolution // 16,
+                 )
+             
+             if not self.keep_models_loaded:

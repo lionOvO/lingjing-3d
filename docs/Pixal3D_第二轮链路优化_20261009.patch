@@ -1,0 +1,189 @@
+--- E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\python_embeded\Lib\site-packages\o_voxel\convert\flexible_dual_grid.py.bak-before-tile-core-20261009
++++ E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\python_embeded\Lib\site-packages\o_voxel\convert\flexible_dual_grid.py
+@@ -45,25 +45,23 @@
+                     # exactly what the custom CUDA kernel expects.
+                     t_coords = coords[mask].contiguous()
+                     t_dual = dual_vertices[mask].contiguous()
+-                    t_inter = intersected_flag[mask].contiguous()
++                    # Halo cells supply neighbors; only core cells own intersections.
++                    t_inter = (intersected_flag[mask] & torch.all((t_coords >= lower) & (t_coords < upper), dim=1)[:, None]).contiguous()
+                     t_weight = split_weight[mask].contiguous()
+                     
+                     if not t_inter.any():
+                         pbar.update(1)
+                         continue
+ 
+-                    try:
+-                        t_verts, t_faces = flexible_dual_grid_to_mesh(
+-                            t_coords, t_dual, t_inter, t_weight,
+-                            aabb=aabb, grid_size=grid_size, train=train
+-                        )
+-                        
+-                        if t_verts is not None and t_verts.shape[0] > 0:
+-                            all_vertices.append(t_verts)
+-                            all_faces.append(t_faces + vertex_count)
+-                            vertex_count += t_verts.shape[0]
+-                    except RuntimeError:
+-                        continue
++                    t_verts, t_faces = flexible_dual_grid_to_mesh(
++                        t_coords, t_dual, t_inter, t_weight,
++                        aabb=aabb, grid_size=grid_size, train=train
++                    )
++
++                    if t_verts is not None and t_verts.shape[0] > 0:
++                        all_vertices.append(t_verts)
++                        all_faces.append(t_faces + vertex_count)
++                        vertex_count += t_verts.shape[0]
+                 
+                 pbar.update(1)
+     
+--- E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\ComfyUI\custom_nodes\ComfyUI-Trellis2-GGUF\patch\flexible_dual_grid.py.bak-before-tile-core-20261009
++++ E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\ComfyUI\custom_nodes\ComfyUI-Trellis2-GGUF\patch\flexible_dual_grid.py
+@@ -45,25 +45,23 @@
+                     # exactly what the custom CUDA kernel expects.
+                     t_coords = coords[mask].contiguous()
+                     t_dual = dual_vertices[mask].contiguous()
+-                    t_inter = intersected_flag[mask].contiguous()
++                    # Halo cells supply neighbors; only core cells own intersections.
++                    t_inter = (intersected_flag[mask] & torch.all((t_coords >= lower) & (t_coords < upper), dim=1)[:, None]).contiguous()
+                     t_weight = split_weight[mask].contiguous()
+ 
+                     if not t_inter.any():
+                         pbar.update(1)
+                         continue
+ 
+-                    try:
+-                        t_verts, t_faces = flexible_dual_grid_to_mesh(
+-                            t_coords, t_dual, t_inter, t_weight,
+-                            aabb=aabb, grid_size=grid_size, train=train
+-                        )
+-
+-                        if t_verts is not None and t_verts.shape[0] > 0:
+-                            all_vertices.append(t_verts)
+-                            all_faces.append(t_faces + vertex_count)
+-                            vertex_count += t_verts.shape[0]
+-                    except RuntimeError:
+-                        continue
++                    t_verts, t_faces = flexible_dual_grid_to_mesh(
++                        t_coords, t_dual, t_inter, t_weight,
++                        aabb=aabb, grid_size=grid_size, train=train
++                    )
++
++                    if t_verts is not None and t_verts.shape[0] > 0:
++                        all_vertices.append(t_verts)
++                        all_faces.append(t_faces + vertex_count)
++                        vertex_count += t_verts.shape[0]
+ 
+                 pbar.update(1)
+ 
+--- E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\ComfyUI\custom_nodes\ComfyUI-Trellis2-GGUF\trellis2_gguf\models\__init__.py.bak-before-gguf-meta-20261009
++++ E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\ComfyUI\custom_nodes\ComfyUI-Trellis2-GGUF\trellis2_gguf\models\__init__.py
+@@ -321,6 +321,10 @@
+     else:
+         sd = load_file(model_file)
+ 
++    # GGUF flow weights are assigned directly; avoid dense temporary storage.
++    meta_gguf = is_gguf and config['name'] in {
++        'SparseStructureFlowModel', 'SLatFlowModel', 'ElasticSLatFlowModel'
++    } and kwargs.get('pe_mode', config['args'].get('pe_mode')) == 'rope'
+     # Build model (skip random init for speed)
+     model_class = __getattr__(config['name'])
+     _orig_init_weights = getattr(model_class, 'initialize_weights', None)
+@@ -340,14 +344,24 @@
+         sig = inspect.signature(model_class.__init__)
+         has_var_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+         final_args = {k: v for k, v in merged_args.items() if has_var_kwargs or k in sig.parameters}
+-        model = model_class(**final_args)
++        if meta_gguf:
++            with torch.device('meta'):
++                model = model_class(**final_args)
++                model = gguf_utils.convert_to_ggml(model)
++            # Shared modulation originally draws small CPU tensors in each block.
++            # Preserve that generator advance: SS/texture noise uses the CPU RNG.
++            if getattr(model, 'share_mod', False):
++                for block in model.blocks:
++                    torch.randn(block.modulation.shape, device='cpu', dtype=torch.get_default_dtype())
++        else:
++            model = model_class(**final_args)
+     finally:
+         for name, fn in _orig_inits.items():
+             setattr(init, name, fn)
+         if _orig_init_weights:
+             model_class.initialize_weights = _orig_init_weights
+ 
+-    if is_gguf:
++    if is_gguf and not meta_gguf:
+         model = gguf_utils.convert_to_ggml(model)
+ 
+     missing_parameters = sorted(set(dict(model.named_parameters())) - set(sd))
+@@ -358,20 +372,42 @@
+             f"({', '.join(missing_parameters[:5])}). "
+             "Install weights for the selected model; renaming a different checkpoint is not sufficient."
+         )
+-    model.load_state_dict(sd, strict=False)
++    if meta_gguf:
++        # Match the former copy_ destination dtype for unquantized tensors.
++        # Own their writable storage; quantized tensors retain the GGML loader.
++        placeholders = dict(model.named_parameters()) | dict(model.named_buffers())
++        for key, value in sd.items():
++            if key in placeholders and getattr(value, 'tensor_type', None) in {None, 0, 1}:
++                plain = value.as_subclass(torch.Tensor) if type(value) is not torch.Tensor else value
++                owner = model.get_submodule(key.rsplit('.', 1)[0]) if '.' in key else model
++                # Native GGUF Linear assigns checkpoint bias/weight dtype directly.
++                native_linear = isinstance(owner, gguf_utils.GGMLOps.Linear) and gguf_utils.GGMLOps.Linear.__module__.startswith('gguf_native.')
++                dtype = value.dtype if native_linear else placeholders[key].dtype
++                sd[key] = plain.to(dtype=dtype, copy=True)
++        model.load_state_dict(sd, strict=False, assign=True)
++    else:
++        model.load_state_dict(sd, strict=False)
+ 
+     if is_gguf and hasattr(model, "rope_phases") and model.rope_phases is not None:
+         try:
+             from ..modules.attention.rope import RotaryPositionEmbedder
+             logger.info("Regenerating rope_phases for GGUF model to restore complex float32 positional embeddings...")
+             pos_embedder = RotaryPositionEmbedder(model.model_channels // model.num_heads, 3)
+-            coords = torch.meshgrid(*[torch.arange(res, device=model.rope_phases.device) for res in [model.resolution] * 3], indexing='ij')
++            rope_device = next(model.parameters()).device if meta_gguf else model.rope_phases.device
++            coords = torch.meshgrid(*[torch.arange(res, device=rope_device) for res in [model.resolution] * 3], indexing='ij')
+             coords = torch.stack(coords, dim=-1).reshape(-1, 3)
+             rope_phases = pos_embedder(coords)
+-            model.rope_phases.copy_(rope_phases)
++            if meta_gguf:
++                model.rope_phases = rope_phases
++            else:
++                model.rope_phases.copy_(rope_phases)
+         except Exception as e:
+             logger.warning("Failed to regenerate rope_phases: %s", e)
+ 
++    if meta_gguf:
++        unmaterialized = [name for name, value in list(model.named_parameters()) + list(model.named_buffers()) if value.is_meta]
++        if unmaterialized:
++            raise RuntimeError(f"GGUF checkpoint left tensors unmaterialized: {', '.join(unmaterialized[:5])}")
+     return model
+ 
+ 
+--- E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\ComfyUI\custom_nodes\ComfyUI-Trellis2-GGUF\trellis2_gguf\pipelines\trellis2_image_to_3d.py.bak-before-stage-owners-20261009
++++ E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\ComfyUI\custom_nodes\ComfyUI-Trellis2-GGUF\trellis2_gguf\pipelines\trellis2_image_to_3d.py
+@@ -1730,8 +1730,11 @@
+             pbar.update(1)
+         
+         if not self.keep_models_loaded:
++            ss_model = None
+             self.unload_sparse_structure_model()
+-            ss_model = None
++            if ss_attn_mode == 'proj':
++                proj_cond_model = None
++                self.unload_pixal3d_image_cond_ss()
+         
+         # Sampling Shape
+         # Build proj conds for shape/tex stages if needed (Pixal3D models require proj conditioning)
+@@ -1745,6 +1748,9 @@
+             cond_512 = self.get_proj_cond_shape(shape_512_model, images, coords,
+                                                 grid_resolution_override=coords_grid_res)
+             if pipeline_type != '512':
++                if not self.keep_models_loaded:
++                    shape_512_model = None
++                    self.unload_pixal3d_image_cond_shape_512()
+                 shape_1024_model = self.load_pixal3d_image_cond_shape_1024()
+                 cond_1024 = self.get_proj_cond_shape(shape_1024_model, images, coords,
+                                                      grid_resolution_override=coords_grid_res)

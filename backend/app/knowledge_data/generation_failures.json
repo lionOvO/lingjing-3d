@@ -1,0 +1,85 @@
+{
+  "version": "2026-10-23.1",
+  "entries": [
+    {
+      "id": "gpu-memory",
+      "codes": ["gpu_oom"],
+      "title": "GPU 显存分配失败",
+      "content": "CUDA 分配失败属于显存问题，不能用磁盘空闲容量判断。当前空闲显存只说明检测时状态，不能还原失败时的峰值。",
+      "applicability": "错误明确包含 CUDA out of memory、Allocation on device 或同等 GPU 分配失败信息；本机 Pixal3D 的历史案例来自 6GB 显卡。",
+      "verification": "历史任务 #33 修复后完整生成成功；不保证其他输入或更高设置同样成功。",
+      "actions": ["先确认生成队列是否仍有任务，避免连续提交。", "若选择了实验性 2048px 纹理，返回配置改用已验证的 1024px；保留原图与随机种子便于对照。", "若已经使用 1024px，记录失败节点并核对低显存与模型卸载配置；NAF 编码卸载补丁仅适用于对应插件版本。"],
+      "sources": [{"title": "NAF 编码显存修复及任务 #33 验证", "document": "docs/Pixal3D_NAF编码显存修复_20261021.md"}]
+    },
+    {
+      "id": "host-memory",
+      "codes": ["host_memory"],
+      "title": "系统内存或提交额度不足",
+      "content": "CPU 内存分配失败与 GPU 显存不足需要分开处理。Windows 提交额度取决于物理内存与实际分页文件；磁盘有空闲空间不代表分页文件已扩容。",
+      "applicability": "日志明确出现 MemoryError、DefaultCPUAllocator、not enough memory、paging file 或系统提交额度不足。",
+      "verification": "任务 #36 使用原图、原参数在缓冲区及阶段生命周期修复后完整生成成功；未完成多输入长时间压力验证。",
+      "actions": ["在任务管理器内存页记录“已提交”当前值与上限，同时记录可用物理内存；不要只看磁盘剩余容量。", "检查失败时的 ComfyUI 日志和 Windows 资源耗尽事件，确认是否触及提交上限。", "核对已安装的缓冲区与阶段生命周期修复，关闭自己不需要的大型程序后再评估；不要重复运行补丁或直接删除模型权重。"],
+      "sources": [{"title": "生成内存修复及任务 #36 完整验证", "document": "docs/生成内存修复_20261022.md"}]
+    },
+    {
+      "id": "engine-offline",
+      "codes": ["engine_unreachable"],
+      "title": "ComfyUI 连接失败",
+      "content": "连接被拒绝表示当时没有可用连接，可能是引擎未启动、已退出或地址配置不匹配。这条错误本身不能证明是内存不足。",
+      "applicability": "Connection refused、ConnectError 或本机 3D 引擎连接失败。",
+      "verification": "项目适配器已区分连接失败与执行期间断连；这是故障定位规则，不是自动修复成功案例。",
+      "actions": ["先使用项目一键启动脚本，等待 ComfyUI 就绪后重新检测。", "若仍离线，核对启动日志中的监听端口与本机引擎地址。", "若引擎曾自行退出，保留退出前日志并查看系统资源事件，再判断崩溃原因。"],
+      "sources": [{"title": "引擎断开提示与边界", "document": "docs/生成内存修复_20261022.md"}]
+    },
+    {
+      "id": "engine-disconnected",
+      "codes": ["engine_disconnected"],
+      "title": "执行期间连接中断",
+      "content": "Server disconnected 或执行期间断连仅能确认通信中断。进程崩溃、手动停止、网络和资源耗尽均需进一步证据；检测时已经恢复在线不代表上次任务完成。",
+      "applicability": "RemoteProtocolError、Server disconnected 或本机引擎在生成期间断开连接。",
+      "verification": "历史任务存在内存相关断连，但不能把所有断连归为同一原因。",
+      "actions": ["对照失败时间查看 ComfyUI 控制台末尾的异常与退出记录。", "若出现 MemoryError 或系统资源耗尽事件，再按系统内存故障处理；若出现 CUDA 分配失败，再按显存故障处理。", "先核实队列和历史输出，确认原任务不再运行后再手动重新生成。"],
+      "sources": [{"title": "生成内存调查与断连处理", "document": "docs/生成内存修复_20261022.md"}]
+    },
+    {
+      "id": "execution-timeout",
+      "codes": ["timeout"],
+      "title": "等待超时，执行结果尚需确认",
+      "content": "请求超时不等于 GPU 执行已停止。适配器不应因为等待失败再次提交相同的昂贵任务。",
+      "applicability": "ReadTimeout、timed out、did not complete within 或执行超时。",
+      "verification": "依据当前适配器的等待与错误处理实现，未声称超时任务已成功。",
+      "actions": ["检查当前引擎队列；队列计数属于整个引擎，不能单凭计数确认就是本任务。", "对照任务时间在 ComfyUI 历史中确认原任务的结果和输出文件。", "确认原任务结束后，才重新提交；只有明确是等待窗口不足时才调整超时。"],
+      "sources": [{"title": "ComfyUI 适配器执行与等待实现", "document": "services/trellis/app.py"}]
+    },
+    {
+      "id": "missing-resource",
+      "codes": ["missing_resource"],
+      "title": "模型文件、节点或工作流配置缺失",
+      "content": "资源缺失通常应先修复安装与路径，增加内存或重复生成不能补齐缺失文件。",
+      "applicability": "明确包含 checkpoint/model/onnx 文件缺失、节点不存在或工作流缺少必要节点。",
+      "verification": "依据适配器资源检查规则；需要用实际错误中的文件名核对。",
+      "actions": ["记录缺失的具体文件名或节点类型，核对当前工作流与插件版本。", "从对应模型或插件的可信发布来源补齐资源，核对路径及文件完整性。", "重新检测工作流就绪状态后再生成，不要为了通过检查随意替换模型。"],
+      "sources": [{"title": "适配器资源与能力检查", "document": "services/trellis/app.py"}]
+    },
+    {
+      "id": "input-preparation",
+      "codes": ["input_preparation"],
+      "title": "参考图前景尚未满足生成条件",
+      "content": "复杂背景可能被重建为模型几何；抠图结果缺失手、衣摆或物品底座时，继续生成也无法恢复已经删除的像素。",
+      "applicability": "错误明确指向 foreground、透明通道、复杂背景或参考图确认。",
+      "verification": "依据当前输入确认规则；抠图完整性仍需与原图对照。",
+      "actions": ["返回参考图预处理，将原图与最终输入并排检查。", "用补回画笔恢复被误删部分，必要时换分割方式或重新框选主体。", "确认主体完整并保存最终输入后再开始生成；不要以绕过检查代替修复缺失内容。"],
+      "sources": [{"title": "参考图确认与前景检查", "document": "services/trellis/app.py"}]
+    },
+    {
+      "id": "output-missing",
+      "codes": ["output_missing"],
+      "title": "执行结束但未交付有效模型",
+      "content": "引擎执行结束与 GLB 导出、读取、保存成功是不同环节。没有文件不能据此判断为显存不足。",
+      "applicability": "明确包含 completed without a GLB、artifact missing 或模型保存失败。",
+      "verification": "依据当前适配器导出检查和后端文件存储流程。",
+      "actions": ["核对 ComfyUI 导出节点是否报错以及是否写出了 GLB。", "若已有输出，核对项目输出目录映射及文件读取权限。", "若错误发生在保存阶段，检查对象存储状态；先保留已有文件，避免无必要地重跑生成。"],
+      "sources": [{"title": "GLB 导出与读取实现", "document": "services/trellis/app.py"}, {"title": "模型保存实现", "document": "backend/app/storage.py"}]
+    }
+  ]
+}

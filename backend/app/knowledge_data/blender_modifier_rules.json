@@ -1,0 +1,688 @@
+[
+  {
+    "seed_key": "blender.modifier.non_destructive.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 修饰符：优先采用非破坏性流程",
+    "content": "修饰符通常通过显示和渲染结果影响对象，但不直接改变可编辑的基础几何体。生成 Agent 应先保留基础网格和修饰符堆栈，只有在导出、绑定或目标平台明确要求时才应用修饰符。这样可以回退、调参并记录生成过程。该条目是 Blender 官方手册规则，不是某个生成引擎的成功率承诺。",
+    "tags": ["blender", "modifier", "non_destructive", "workflow", "official_manual", "confidence_high", "empirical_false"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/modifiers/introduction.html",
+    "object_type": "anime_character",
+    "model_type": "blender_modifier_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.modifier.non_destructive.v1",
+        "principle": "preserve_base_mesh_and_stack",
+        "default_action": "keep_unapplied",
+        "apply_only_when": ["export_requires_baked_geometry", "downstream_tool_does_not_support_modifier", "final_topology_snapshot_is_required"],
+        "record_before_apply": ["modifier_type", "stack_index", "parameters", "object_name", "blender_version"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.modifier.stack_order.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 修饰符堆栈：顺序必须显式记录",
+    "content": "修饰符按堆栈从上到下计算，顺序会改变结果。Agent 生成或修改堆栈时必须记录顺序、每一步的目的和依赖，不能只记录最终参数。Mirror 与 Subdivision Surface 的先后会产生不同结果；因此任何模板都必须经过目标角色和目标引擎验证。",
+    "tags": ["blender", "modifier_stack", "evaluation_order", "mirror", "subdivision", "official_manual", "confidence_high", "empirical_false"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/modifiers/introduction.html",
+    "object_type": "anime_character",
+    "model_type": "blender_modifier_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.modifier.stack_order.v1",
+        "required_metadata": ["ordered_stack", "purpose_per_modifier", "dependencies", "blender_version"],
+        "default_review": "compare_before_after_reordering",
+        "known_example": {"first": "MIRROR", "second": "SUBSURF", "note": "order is material; validate the intended result"}
+      }
+    }
+  },
+  {
+    "seed_key": "blender.modifier.categories.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 修饰符分类：按拓扑影响选择策略",
+    "content": "官方手册将内置修饰符分为 Edit、Generate、Deform、Simulation 等类别。Generate 类通常可能增加或改变网格拓扑；Deform 类主要改变形状而不改变拓扑；Edit 类通常处理顶点组等数据；Simulation 类承载物理或粒子模拟。Agent 应先判断任务需要形变、拓扑生成还是模拟，再决定是否应用以及是否允许进入 Shape Key 或绑定流程。",
+    "tags": ["blender", "modifier_category", "topology", "deform", "generate", "simulation", "official_manual", "confidence_high", "empirical_false"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/modifiers/introduction.html",
+    "object_type": "anime_character",
+    "model_type": "blender_modifier_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.modifier.categories.v1",
+        "category_decision": {"topology_change": "prefer_generate_review", "shape_only": "prefer_deform", "vertex_data": "prefer_edit_review", "simulation": "treat_as_simulation_dependency"},
+        "before_next_stage": "classify_topology_effect"
+      }
+    }
+  },
+  {
+    "seed_key": "blender.modifier.shapekey.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 形状键：只接收不改变拓扑的结果",
+    "content": "Blender 手册说明，以 Shape Key 应用或保存修改器结果只适用于不影响拓扑的修饰符，通常是 Deform 类修饰符。Agent 在生成面部表情、身体校正或动画变形前，必须检查堆栈中是否存在会改变拓扑的修饰符；不满足时应阻止自动保存为 Shape Key 并给出原因。",
+    "tags": ["blender", "shape_key", "facial_expression", "deform", "topology", "official_manual", "confidence_high", "empirical_false"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/modifiers/introduction.html",
+    "object_type": "anime_character",
+    "model_type": "blender_modifier_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.modifier.shapekey.v1",
+        "allow_shape_key": "only_if_modifier_preserves_topology",
+        "block_when": ["modifier_changes_vertex_count", "modifier_changes_face_connectivity", "topology_effect_is_unknown"],
+        "required_check": "topology_snapshot_before_and_after"
+      }
+    }
+  },
+  {
+    "seed_key": "blender.modifier.apply_policy.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 修饰符应用：应用前检查依赖和顺序",
+    "content": "应用修饰符会把结果转换为真实几何并从堆栈中删除修饰符。应用非堆栈首位的修饰符可能忽略原有顺序并产生不理想结果；共享对象数据时还需要先处理单一用户。Agent 在应用前应保存源文件或版本快照，确认依赖对象、堆栈顺序、UV、材质、骨骼和导出目标，再执行应用。",
+    "tags": ["blender", "apply_modifier", "stack_order", "single_user", "export", "official_manual", "confidence_high", "empirical_false"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/modifiers/introduction.html",
+    "object_type": "anime_character",
+    "model_type": "blender_modifier_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.modifier.apply_policy.v1",
+        "pre_apply": ["save_version", "verify_stack_order", "verify_object_data_ownership", "verify_uv_materials", "verify_rig_dependencies", "verify_export_target"],
+        "post_apply": ["recount_topology", "recalculate_normals_if_needed", "validate_uv", "validate_rig", "record_applied_modifier"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.modifier.visibility.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 修饰符可见性：区分视口、编辑模式和渲染",
+    "content": "修饰符面板分别提供编辑模式、视口实时显示和渲染显示等开关。Agent 不能把视口里看到的结果直接当成最终渲染或导出结果；生成验收应明确记录 show_in_editmode、show_viewport、show_render，以及是否启用笼子网格。",
+    "tags": ["blender", "viewport", "edit_mode", "render", "show_viewport", "show_render", "official_manual", "confidence_high", "empirical_false"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/modifiers/introduction.html",
+    "object_type": "anime_character",
+    "model_type": "blender_modifier_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.modifier.visibility.v1",
+        "required_flags": ["show_in_editmode", "show_viewport", "show_render", "show_on_cage"],
+        "validation": "compare_viewport_render_and_export_state"
+      }
+    }
+  },
+  {
+    "seed_key": "blender.character.body_stack.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "人物身体基础堆栈模板：仅作为项目起始策略",
+    "content": "针对对称的人物基础网格，可以把 Mirror 和 Subdivision Surface 作为候选起始堆栈，再根据是否需要骨骼变形、校正平滑和目标平台决定后续步骤。该模板是项目策略，不是 Blender 官方规定，也不是所有角色都适用。生成后必须检查对称、拓扑、骨骼变形和面数。",
+    "tags": ["blender", "anime_character", "body", "mirror", "subdivision", "armature", "project_strategy", "needs_validation"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/modifiers/introduction.html",
+    "object_type": "anime_character",
+    "model_type": "blender_modifier_template",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.character.body_stack.v1",
+        "candidate_stack": ["MIRROR", "SUBSURF", "ARMATURE"],
+        "optional_after_review": ["CORRECTIVE_SMOOTH", "WEIGHTED_NORMAL"],
+        "checks": ["symmetry", "topology", "face_count", "deformation", "viewport_render_consistency"],
+        "evidence_status": "project_template_pending_empirical_validation"
+      }
+    }
+  },
+  {
+    "seed_key": "blender.character.clothing_stack.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "人物服装候选堆栈模板：厚度、倒角和法线分开验证",
+    "content": "对需要实体厚度的服装，Solidify、Bevel 和法线处理可以作为候选步骤，但具体顺序必须根据服装是否需要镜像、是否要绑定骨骼、是否有透明材质以及导出目标验证。Agent 不应仅凭模板自动应用，因为服装穿插、非流形和法线问题需要模型级检查。",
+    "tags": ["blender", "anime_character", "clothing", "solidify", "bevel", "normal", "project_strategy", "needs_validation"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/modifiers/introduction.html",
+    "object_type": "anime_character",
+    "model_type": "blender_modifier_template",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.character.clothing_stack.v1",
+        "candidate_stack": ["MIRROR", "SOLIDIFY", "BEVEL", "WEIGHTED_NORMAL", "ARMATURE"],
+        "checks": ["thickness", "self_intersection", "non_manifold", "normals", "rig_deformation", "export_compatibility"],
+        "evidence_status": "project_template_pending_empirical_validation"
+      }
+    }
+  },
+  {
+    "seed_key": "blender.generation.validation.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "人物模型生成后验收：修饰符结果检查清单",
+    "content": "在把修饰符结果交给后处理、绑定或导出前，Agent 应至少检查：修饰符堆栈顺序是否符合记录；视口和渲染开关是否符合目标；拓扑是否发生预期变化；法线和 UV 是否有效；模型是否出现非流形、退化面、穿插；骨骼或形状键是否仍可用；面数、纹理分辨率和文件格式是否满足任务配置。缺少检查数据时应返回 warning，而不是声称通过。",
+    "tags": ["blender", "quality_check", "validation", "topology", "uv", "normals", "rig", "official_manual", "project_policy", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/modifiers/introduction.html",
+    "object_type": "anime_character",
+    "model_type": "blender_modifier_validation",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.generation.validation.v1",
+        "required_checks": ["stack_order", "viewport_render_flags", "topology_delta", "normals", "uv", "non_manifold", "degenerate_faces", "intersections", "rig_or_shape_key", "face_count", "texture_resolution", "export_format"],
+        "missing_data_policy": "warning_and_manual_review"
+      }
+    }
+  },
+  {
+    "seed_key": "blender.modifier.agent_decision.v1",
+    "entry_type": "character_style",
+    "collection_name": "character_style_collection",
+    "title": "Agent 使用 Blender 修饰符知识的决策顺序",
+    "content": "Agent 处理人物图片到 3D 的任务时，先判断目标是预览、可编辑资产、绑定动画还是最终导出；再判断候选修饰符是否改变拓扑；然后生成带顺序和理由的堆栈；最后根据视口、渲染、拓扑、UV、法线、骨骼和导出结果验收。官方手册只负责解释 Blender 行为，角色比例、面数预算和生成引擎参数必须来自经过验证的项目数据。",
+    "tags": ["blender", "agent", "decision_policy", "image_to_3d", "character_generation", "official_manual", "confidence_high", "empirical_false"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/modifiers/introduction.html",
+    "object_type": "anime_character",
+    "model_type": "blender_modifier_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.modifier.agent_decision.v1",
+        "decision_order": ["target_stage", "topology_effect", "ordered_stack", "apply_policy", "validation", "provenance"],
+        "never_infer_from_this_source": ["human_measurements", "image_license", "engine_success_rate", "unverified_face_count", "unverified_texture_resolution"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.elements.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 网格基础元素：顶点、边和面必须分别理解",
+    "content": "Blender 官方手册说明，网格由顶点、边和面构成：顶点是三维空间中的坐标点，边以直线连接两个顶点，面定义可渲染的表面。Agent 解析或验收人物模型时，应分别记录顶点数、边数和面数，并确认渲染所需区域确实由面覆盖；不能把物体原点误认为顶点。",
+    "tags": ["blender", "mesh", "vertex", "edge", "face", "topology", "model_metadata", "official_rule", "confidence_high", "empirical_false"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/structure.html",
+    "object_type": "anime_character",
+    "model_type": "blender_mesh_structure",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.elements.v1",
+        "required_metadata": ["vertex_count", "edge_count", "face_count", "object_origin_separated"],
+        "validation": ["surface_faces_exist", "mesh_element_counts_are_recorded"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.quad_animation.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "人物拓扑面类型：动画和细分阶段优先检查四边面",
+    "content": "官方手册说明，三角形总是平面且便于计算；四边形通常更适合变形和细分建模。对人物面部表情、肩膀、膝盖等需要变形的区域，Agent 可将连续四边面流作为项目优先策略，但这不是所有模型的硬性规则；最终仍需用目标姿势、细分和导出结果验证。三角形或 n 边形的存在本身不等于失败。",
+    "tags": ["blender", "mesh", "triangle", "quad", "ngon", "subdivision", "character_animation", "official_rule", "project_strategy", "confidence_high", "needs_validation"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/structure.html",
+    "object_type": "anime_character",
+    "model_type": "blender_topology_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.quad_animation.v1",
+        "preferred_for_deformation": "QUAD_FLOW",
+        "review_regions": ["face", "shoulder", "knee", "other_high_deformation_areas"],
+        "failure_is_not_inferred_from": ["triangle_presence", "ngon_presence"],
+        "requires_empirical_check": ["pose_deformation", "subdivision_result", "export_triangulation"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.normals_shading.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 网格法线和阴影：平滑策略必须随资产记录",
+    "content": "法线表示垂直于面或曲面的方向，会影响光照和阴影。平面着色使面均匀显示，平滑着色会在多边形顶点间插值以形成连续过渡；人物皮肤、脸部和圆润服装通常需要验证平滑结果，而硬表面边缘可能需要保留平面效果。Agent 不应只看几何是否存在，还要在目标材质和渲染器中检查法线与阴影伪影。",
+    "tags": ["blender", "mesh", "normal", "shading", "flat_shading", "smooth_shading", "render", "official_rule", "confidence_high", "empirical_false"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/structure.html",
+    "object_type": "anime_character",
+    "model_type": "blender_shading_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.normals_shading.v1",
+        "required_checks": ["normal_direction", "flat_or_smooth_intent", "render_shadow_artifacts", "material_specific_result"],
+        "default_action": "preserve_explicit_shading_intent",
+        "do_not_claim": ["visually_correct_without_target_render_check"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.custom_normals_pipeline.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 自定义分割法线：导出和变形前必须确认兼容性",
+    "content": "官方手册说明，自定义分割法线可按面角等粒度存储，可用于调整或伪造阴影，常见于游戏资产和低多边形模型；其效果依赖网格法线数据和导入导出链路。手册当前页面特别说明可导入自定义法线的导入器范围有限，Agent 应把导入器、导出格式、Blender 版本和是否保留法线数据作为显式依赖，不能默认所有格式都支持。",
+    "tags": ["blender", "custom_split_normals", "game_asset", "low_poly", "import", "export", "pipeline", "official_rule", "confidence_high", "requires_validation"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/structure.html",
+    "object_type": "anime_character",
+    "model_type": "blender_normal_pipeline",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.custom_normals_pipeline.v1",
+        "record_before_export": ["normal_data_present", "normal_domain", "export_format", "importer", "blender_version"],
+        "validate_after_import": ["normal_data_preserved", "shading_matches_source", "deformation_does_not_break_normals"],
+        "compatibility": "never_assume_universal_support"
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.free_normals_static_only.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 自由法线：不作为动态人物的默认方案",
+    "content": "官方手册说明，自由法线以对象空间方向向量存储，不受网格拓扑、平滑组或连通性影响，评估高效且占用较少内存；但在修改器或动画导致网格变形时不会自动更新，因此更适合静态几何或极端性能场景。人物 Agent 只有在资产明确为静态展示且已验证渲染效果时才应考虑使用，动态角色默认要求重新验证法线。",
+    "tags": ["blender", "free_normals", "normal", "static_geometry", "animation", "deformation", "performance", "official_rule", "confidence_high", "empirical_false"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/structure.html",
+    "object_type": "anime_character",
+    "model_type": "blender_normal_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.free_normals_static_only.v1",
+        "default_for_animated_character": "avoid_unless_validated",
+        "allowed_context": ["static_geometry", "explicit_performance_budget"],
+        "required_checks": ["deformation_state", "animation_state", "post_import_shading"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.loops_poles_character.v1",
+    "entry_type": "character_style",
+    "collection_name": "character_style_collection",
+    "title": "人物拓扑流：边环、面环和极点用于指导变形审查",
+    "content": "官方手册说明，边环和面环是形成连续环的边或面集合；边环对有机建模和角色动画尤其重要，合理布置可用较少顶点获得自然的细分与变形效果。极点是连接三条、五条或更多边的顶点，环可能在那里终止。Agent 应把边环连续性和极点位置作为脸部表情、肩膀、膝盖等高变形区域的审查项，但不能仅因存在极点就判定模型失败。",
+    "tags": ["blender", "mesh", "edge_loop", "face_loop", "pole", "topology", "organic_modeling", "character_animation", "official_rule", "project_strategy", "confidence_high", "needs_validation"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/structure.html",
+    "object_type": "anime_character",
+    "model_type": "blender_topology_review",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.loops_poles_character.v1",
+        "review_regions": ["face", "shoulder", "knee", "mouth", "eye_area"],
+        "required_checks": ["loop_continuity", "pole_location", "subdivision_behavior", "pose_deformation"],
+        "failure_is_not_inferred_from": ["pole_presence_alone", "loop_termination_alone"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.workflow_modes.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 网格建模流程：按 Object、Edit 和 Sculpt 分段验收",
+    "content": "Blender 官方手册把网格建模描述为先用基础体阻塞外形，再用工具增加细节；Object Mode 适合创建、合并和管理 Shape Key 与 UV/颜色层，Edit Mode 承担多数多边形编辑，Sculpt Mode 通过笔刷把网格当作黏土变形。Agent 应把阶段和模式写入生成计划，阶段切换前检查拓扑、属性和形状状态，不能把雕刻结果直接当作可绑定资产。",
+    "tags": ["blender", "mesh", "workflow", "object_mode", "edit_mode", "sculpt_mode", "character_pipeline", "official_rule", "project_strategy", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/index.html",
+    "object_type": "anime_character",
+    "model_type": "blender_mesh_workflow",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.workflow_modes.v1",
+        "workflow_stages": ["blockout", "edit_mode_detailing", "sculpt_or_retopology", "cleanup_and_uv", "rigging_and_export"],
+        "record_per_stage": ["mode", "mesh_source", "topology_delta", "attributes", "shape_keys"],
+        "project_gate": "do_not_promote_sculpt_to_rigging_without_retopology_cleanup_and_validation"
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.primitive_selection.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 基础体选择：按拓扑意图和用途启动建模",
+    "content": "官方手册说明内置基础体有 Plane、Cube、Circle、Quad Sphere、UV Sphere、Icosphere、Cylinder、Cone、Torus 和 Grid 等，并且可在创建面板记录 Generate UVs 等选项。Quad Sphere 全由四边面组成，均匀性适合雕刻和细分；UV Sphere 在极点有三角扇，Icosphere 是均匀三角网格；Plane/Grid 是无厚度表面，Cylinder/Cone 的封口类型会影响拓扑。Agent 应把基础体类型、分段、封口、尺寸和是否生成 UV 写入初始计划，而不是把基础体参数当作人物比例。",
+    "tags": ["blender", "mesh", "primitive", "plane", "cube", "quad_sphere", "uv_sphere", "icosphere", "topology", "uv", "official_rule", "project_strategy", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/primitives.html",
+    "object_type": "anime_character",
+    "model_type": "blender_mesh_blockout",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.primitive_selection.v1",
+        "required_metadata": ["primitive_type", "segments", "cap_fill_type", "size_or_radius", "generate_uvs"],
+        "selection_intent": {
+          "quad_sphere": "sculpt_or_subdivision_candidate",
+          "uv_sphere": "texturing_candidate_with_pole_review",
+          "icosphere": "sculpt_simulation_or_uniform_triangle_case",
+          "plane_grid": "surface_panel_cloth_or_sculpt_base"
+        },
+        "do_not_infer": ["human_measurements", "final_face_count", "character_style"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.remesh_policy.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 重网格：动画人物不能自动重网格后直接交付",
+    "content": "官方手册说明 Voxel 重网格用虚拟三维网格重建近似均匀拓扑，可清理自相交几何，适合雕刻准备、3D 打印清理或物理替身；Quad/Quadriflow 更适合为细分或多分辨率准备，但速度慢且不清理相交几何。重网格只处理原始网格数据，会忽略修改器和 Shape Key，也不能用于 MultiResolution 对象。手册明确自动重网格不适合需要变形的动画人物拓扑，这类拓扑必须手动重拓扑。Agent 只有在确认资产为雕刻、静态或替身用途时才建议重网格，并记录体素尺寸/面数模式、属性保留和前后拓扑。",
+    "tags": ["blender", "mesh", "remesh", "voxel", "quad_remesh", "quadriflow", "sculpt", "animation", "official_rule", "confidence_high", "empirical_false"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/retopology.html",
+    "object_type": "anime_character",
+    "model_type": "blender_remesh_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.remesh_policy.v1",
+        "voxel_use_cases": ["sculpt_preparation", "3d_print_cleanup", "physics_standin"],
+        "quad_use_cases": ["subdivision_or_multires_preparation"],
+        "block_for_animated_character": "automatic_final_topology",
+        "record_before_run": ["mode", "resolution_method", "preserve_attributes", "use_mesh_symmetry", "preserve_sharp_or_boundary"],
+        "known_limit": ["ignores_modifiers_and_shape_keys", "not_available_with_multiresolution"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.retopology_pipeline.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "人物重拓扑：以重叠新网格和参考覆盖进行人工规划",
+    "content": "官方手册指出，自动重网格通常不能产生适合变形的拓扑；把雕刻人物简化为动画资产时，一般需要手动重拓扑。常用做法是创建覆盖原始网格的新网格，不断调整直到覆盖并匹配形状，可使用 Retopology 覆盖层、Poly Build 和吸附。Agent 应保留高模源资产，把新拓扑标记为重拓扑结果，记录低模到高模的对应关系，并在绑定前验证高变形区域的面流。",
+    "tags": ["blender", "mesh", "retopology", "character", "animation", "poly_build", "snapping", "official_rule", "project_strategy", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/retopology.html",
+    "object_type": "anime_character",
+    "model_type": "blender_retopology_pipeline",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.retopology_pipeline.v1",
+        "required_assets": ["source_sculpt_or_scan", "retopologized_mesh", "source_to_retopo_mapping"],
+        "recommended_tools": ["retopology_overlay", "poly_build", "snapping"],
+        "validation": ["face_flow", "high_deformation_regions", "uv_stretch", "pose_deformation", "export_target"],
+        "evidence_status": "official_process_plus_project_validation_required"
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.mesh_analysis_policy.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 网格分析：按用途解释 Overhang 和厚度",
+    "content": "官方手册说明 Mesh Analysis 在 Edit Mode 和 Solid 着色下显示范围外的红色/蓝色，支持 Overhang、Thickness、Intersections、Distortion 和 Sharp Edges；当前主要面向 3D 打印。Overhang 和壁厚是打印物理限制检查；Intersections 关系内外检测，Distortion 与 n 边形三角化未定义相关，Sharp Edges 可显示过薄特征。Agent 不能用 Overhang/Thickness 通过来判断人物渲染或绑定质量；需要按目标输出选择交叉、扭曲、薄边和性能限制检查，缺少数据时保留 warning。",
+    "tags": ["blender", "mesh_analysis", "overhang", "thickness", "intersections", "distortion", "sharp_edges", "3d_print", "official_rule", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/mesh_analysis.html",
+    "object_type": "anime_character",
+    "model_type": "blender_mesh_analysis",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.mesh_analysis_policy.v1",
+        "use_case_scoping": {
+          "3d_print": ["overhang", "thickness", "intersections", "sharp_edges"],
+          "render_asset": ["intersections", "distortion", "shading_artifacts"],
+          "animated_character": ["topology_flow", "intersections", "deformation", "non_manifold"]
+        },
+        "do_not_treat_as_pass_for": ["rendering", "rigging", "animation"],
+        "missing_data_policy": "warning_and_manual_review"
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.cleanup_pipeline.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Blender 清理流程：先快照，再分类处理并复检法线与 UV",
+    "content": "官方 Clean Up 工具包括 Delete Loose、Decimate Geometry、Degenerate Dissolve、Limited Dissolve、Make Planar Faces、Split Non-Planar Faces、Split Concave Faces、Merge by Distance 和 Fill Holes。Agent 应在清理前保存拓扑快照，按问题类型选择操作；Merge by Distance 有阈值，且对使用平滑着色和自定义分割法线的网格可用 Sharp Edges 选项保留锐边。清理后必须复查非流形、孤立元素、退化面、孔洞、面数、法线、UV 和绑定/Shape Key。Decimate 和 Weld 在需要时可使用修饰符形式的非破坏性替代。",
+    "tags": ["blender", "mesh", "cleanup", "loose_geometry", "decimate", "merge_by_distance", "fill_holes", "normals", "uv", "official_rule", "project_strategy", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/editing/mesh/cleanup.html",
+    "object_type": "anime_character",
+    "model_type": "blender_mesh_cleanup",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.cleanup_pipeline.v1",
+        "pre_cleanup": ["save_topology_snapshot", "record_indices_and_attributes", "classify_issues"],
+        "operator_map": {
+          "loose_geometry": "delete_loose",
+          "high_face_count": "decimate_or_collapse_modifier",
+          "short_edges_small_faces": "degenerate_dissolve",
+          "nearby_vertices": "merge_by_distance",
+          "holes": "fill_holes",
+          "non_planar_or_concave": "split_then_review"
+        },
+        "post_cleanup": ["non_manifold", "loose_geometry", "degenerate_faces", "normal_direction", "uv_integrity", "rig_or_shape_key", "face_count"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.non_manifold_review.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "非流形审查：分类计数而不是自动删除",
+    "content": "官方 Select All by Trait 提供按 Non Manifold、Loose Geometry、Interior Faces、Faces by Sides、Poles by Count 和 Ungrouped Vertices 选取。Non Manifold 可分别选择 Wire、Boundaries、Multiple Faces、Non Contiguous 和相关顶点；极点可在细分时造成收缩，但存在极点不等于失败；开放边界可能是设计结果。Agent 应输出每类计数、选择范围和是否属于预期结构，把 Wire、Multiple Faces、Interior Faces 和非预期 Boundary 作为阻断项，其余进入人工或姿势验证。",
+    "tags": ["blender", "mesh", "non_manifold", "wire", "boundary", "interior_faces", "pole", "ungrouped_vertices", "quality_check", "official_rule", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/selecting/all_by_trait.html",
+    "object_type": "anime_character",
+    "model_type": "blender_topology_review",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.non_manifold_review.v1",
+        "required_counts": ["wire_edges", "boundary_edges", "edges_with_multiple_faces", "non_contiguous_edges", "loose_geometry", "interior_faces", "ungrouped_vertices"],
+        "blocking_when": ["wire_edges_unexpected", "multiple_faces", "interior_faces", "non_intentional_boundary"],
+        "manual_review_when": ["pole_count", "high_side_count_faces", "non_manifold_due_to_custom_structure"],
+        "failure_is_not_inferred_from": ["pole_presence_alone", "boundary_presence_alone"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.normal_repair_policy.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "法线修复：先修复面朝向，再处理自定义分割法线",
+    "content": "官方手册说明 Flip 会切换选中面的正反面，Recalculate Outside/Inside 会按需要翻转面朝向，网格不必是封闭体；这两个操作都不影响 Custom Split Normals。面朝向覆盖层可快速发现反向面。Agent 应先修复基础面朝向并保存前后快照，再处理或重算自定义法线；若清理、合并、修改器或导出可能使法线过期，必须对比目标渲染结果，而不是只声称几何已翻转。",
+    "tags": ["blender", "mesh", "normals", "flip_normals", "recalculate_outside", "custom_split_normals", "face_orientation", "official_rule", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/editing/mesh/normals.html",
+    "object_type": "anime_character",
+    "model_type": "blender_normal_repair",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.normal_repair_policy.v1",
+        "order": ["repair_face_orientation", "validate_closed_or_intended_open_mesh", "repair_or_reset_custom_normals", "target_render_check"],
+        "record": ["flipped_face_count", "recalculated_direction", "custom_normals_state", "target_renderer"],
+        "caution": "flip_and_recalculate_do_not_update_custom_split_normals"
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.shading_edges_policy.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "平滑与锐边标记：区域化记录，不做全局假设",
+    "content": "官方 Shading 菜单可对选中面应用 Smooth/Flat Faces，对选中边或包含选中顶点的边应用 Smooth/Sharp Edges。Agent 不应为了快速修图对整个人物全局平滑或全局平面化；应按皮肤、脸部、硬质装饰、服装边缘和武器等区域记录意图。皮肤和圆润服装优先检查平滑结果，锐利边缘应保留或标记 Sharp；最终要在目标材质、光照和渲染器中确认阴影伪影。",
+    "tags": ["blender", "mesh", "shading", "smooth_faces", "flat_faces", "sharp_edges", "character", "material", "official_rule", "project_strategy", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/editing/mesh/shading.html",
+    "object_type": "anime_character",
+    "model_type": "blender_shading_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.shading_edges_policy.v1",
+        "region_intent": ["skin", "face", "clothing", "hard_surface_trim", "weapon_or_accessory"],
+        "required_records": ["face_shading", "sharp_edge_marks", "smooth_vertex_marks"],
+        "validation": ["target_material", "lighting", "silhouette", "shadow_artifacts"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.symmetry_policy.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "对称处理：区分 Snap、Symmetrize 和 Mirror 的风险",
+    "content": "官方手册说明 Interactive Mirror 等价于沿轴缩放 -1，镜像后法线常会翻转；Symmetrize 会沿对象原点切割、删除一侧、镜像复制另一侧并合并平面上的顶点；Snap to Symmetry 只按位置匹配并移动近似对称的顶点，不删除半边。网格镜像工具要求镜像顶点精确对齐，Topology Mirror 依赖拓扑关系且需要至少一个镜像轴，在简单网格上可能不一致。Agent 应按场景选择：小漂移用 Snap，缺半边用 Symmetrize，可编辑对称流程优先考虑 Mirror Modifier；必须记录局部轴、阈值/系数、中心对齐和法线修复结果。",
+    "tags": ["blender", "mesh", "symmetry", "mirror", "symmetrize", "snap_to_symmetry", "topology_mirror", "normals", "official_rule", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/editing/mesh/symmetrize.html",
+    "object_type": "anime_character",
+    "model_type": "blender_symmetry_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.symmetry_policy.v1",
+        "decision_map": {
+          "small_drift": "snap_to_symmetry",
+          "missing_half": "symmetrize",
+          "editable_symmetric_workflow": "mirror_modifier_candidate",
+          "visual_only_flip": "mirror_operator"
+        },
+        "required_records": ["local_axis_and_direction", "threshold_or_factor", "center_alignment", "normal_state"],
+        "post_check": ["uv_or_attribute_symmetry", "face_orientation", "deformation_symmetry"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.topology_edit_operations.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "拓扑编辑操作：选择集、参数和 UV 影响必须成对记录",
+    "content": "官方手册说明 Loop Cut and Slide 会把面环分成平行环，支持切割数、Smoothness、Falloff、Factor、Even/Flipped、Clamp、Mirror Editing 和 Correct UVs；Subdivide 的结果依赖选中的边数和面类型，可生成三角面、四边面或 n 边形；Bridge Edge Loops 会删除选中面，然后在两个或多个边环之间创建面，支持合并、扭曲、中间切割和插值。Agent 执行这些操作时应记录选择模式、目标环/边/面、操作参数、是否纠正 UV、新增拓扑和法线/材质影响。",
+    "tags": ["blender", "mesh", "loop_cut", "subdivide", "bridge_edge_loops", "selection", "uv", "topology", "official_rule", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/editing/edge/loopcut_slide.html",
+    "object_type": "anime_character",
+    "model_type": "blender_topology_edit",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.topology_edit_operations.v1",
+        "required_context": ["selection_mode", "target_loops_or_faces", "operator_parameters", "correct_uvs"],
+        "post_check": ["quad_flow", "pole_delta", "normal_delta", "uv_delta", "material_assignment"],
+        "bridge_caution": ["selected_faces_are_deleted", "loop_alignment_and_twist_must_be_reviewed"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.mesh_edit_tool_settings.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "编辑工具设置：属性纠正、镜像和自动合并要显式记录",
+    "content": "官方 Tool Settings 说明 Correct Face Attributes 可在变换时调整 UV 和颜色属性，Keep Connected 会合并连接到同一顶点的属性，适合有机建模；Mesh Mirror 需要镜像顶点精确对齐，Topology Mirror 需要至少一个镜像轴，在简单网格上可能不一致；Auto Merge 会在顶点小于阈值时自动合并，Split Edges & Faces 会检测相交并分割边/面。Agent 默认不要打开容易改变拓扑的 Auto Merge/Split，除非任务明确需要；开启时记录阈值、属性纠正状态、镜像轴和检查结果。",
+    "tags": ["blender", "mesh", "tool_settings", "correct_face_attributes", "mirror", "topology_mirror", "auto_merge", "threshold", "official_rule", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/tools/tool_settings.html",
+    "object_type": "anime_character",
+    "model_type": "blender_edit_tool_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.mesh_edit_tool_settings.v1",
+        "default": {
+          "correct_face_attributes": "prefer_for_organic_edits",
+          "auto_merge": "disabled_unless_requested",
+          "split_edges_and_faces": "disabled_unless_requested"
+        },
+        "record_when_enabled": ["threshold", "mirror_axes", "topology_mirror", "attribute_correction"],
+        "post_check": ["accidental_merges", "uv_integrity", "attribute_integrity", "symmetry"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.shape_key_edit_policy.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "Shape Key 编辑：Propagate 只用于共享结构修正",
+    "content": "官方手册说明 Propagate to Shapes 会把选中顶点的当前位置应用到对象的所有 Shape Key，用于修正常应一致的基础结构、小建模错误或保持形状键结构一致；但它会覆盖相关顶点在各 Shape Key 中的位置。Blend from Shape 会把选中顶点向指定 Shape Key 的位置混合，Blend 为 0 不变化、1 完全匹配，Add 会先计算形状差异再加到当前几何。Agent 修改表情或体型前应记录当前 Shape Key、受影响顶点、传播范围和位置快照；对表情专属区域不要盲目 Propagate，并在多个表情下复查。",
+    "tags": ["blender", "mesh", "shape_key", "propagate_to_shapes", "blend_from_shape", "facial_expression", "overwrite_risk", "official_rule", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/editing/vertex/propagate_shapes.html",
+    "object_type": "anime_character",
+    "model_type": "blender_shape_key_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.shape_key_edit_policy.v1",
+        "allow_propagate_for": ["structural_correction", "topology_fix", "shared_base_position"],
+        "block_or_review_for": ["expression_specific_deformation", "eyelid_or_mouth_detail", "uncertain_shape_dependencies"],
+        "records": ["active_shape_key", "affected_keys", "selection", "positions_before_after", "blend_value_or_add_mode"],
+        "validation": ["all_relevant_expressions", "rig_weights", "render_check"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.vertex_groups_rigging.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "顶点组与绑定：权重范围、归一化和未分组检查",
+    "content": "官方手册说明顶点组用于标记属于网格特定部位的顶点，可存储 0 到 1 的权重；一个顶点可以属于多个组。Deform Groups 决定骨骼变形影响，变形权重通常需要相加为 1；Normalize 会保持相对比例地把活动顶点的权重重新归一化为 1，锁定的顶点组禁止编辑权重。Agent 在绑定前必须列出骨骼对应的顶点组、权重覆盖、未分组顶点和关键关节权重；锁定组存在时不得试图改写，缺少权重或无法归一化时应返回 warning。",
+    "tags": ["blender", "mesh", "vertex_group", "weight", "deform_group", "armature", "skinning", "normalize", "official_rule", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/properties/vertex_groups/introduction.html",
+    "object_type": "anime_character",
+    "model_type": "blender_rigging_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.vertex_groups_rigging.v1",
+        "required_checks": ["group_names", "bone_mapping", "weight_range_0_to_1", "deform_weight_sum", "ungrouped_vertices", "locked_groups"],
+        "normalization": "preserve_relative_magnitudes_and_sum_to_one",
+        "validation_regions": ["face", "neck", "shoulder", "elbow", "wrist", "hip", "knee", "ankle"],
+        "missing_data_policy": "warning_and_manual_review"
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.uv_timing_and_maps.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "UV 时机与多 UV 图：几何稳定后展开并记录用途",
+    "content": "官方手册说明网格默认不自带 UV，最好在只需要少量几何调整时开始展开；UV 图中的点对应网格顶点，边对应网格边，面对应网格面。一个网格可以有多个 UV 图，不同图可用于纹理、光照烘焙等；Active Render UV 是渲染、合成和未指定节点时的默认图。Agent 在生成前应检查 UV 是否存在、Active Render 指向、用途、面覆盖和导出兼容性；几何仍会大幅修改时先标记待展开，而不是提前宣称纹理坐标最终。",
+    "tags": ["blender", "mesh", "uv_map", "unwrap_timing", "active_render", "texture", "bake", "official_rule", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/uv/uv_texture_spaces.html",
+    "object_type": "anime_character",
+    "model_type": "blender_uv_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.uv_timing_and_maps.v1",
+        "required_metadata": ["uv_map_names", "active_render_map", "intended_use", "unwrapped_face_count", "geometry_change_expected"],
+        "order": ["stabilize_major_topology", "unwrap_or_transfer_uv", "validate_stretch_and_coverage", "texture_or_bake"],
+        "do_not_claim": ["final_texture_coordinates_before_unwrap_and_export_check"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.uv_seams_stretch.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "UV 接缝策略：尽量少缝、少拉伸，并优先隐藏在非可见区",
+    "content": "官方手册说明接缝让 UV 图不连续，用于限制和引导展开；接缝越多通常拉伸越小，但会增加纹理绘制和接缝匹配难度，目标是尽量少接缝同时尽量少拉伸，并尽量藏在不容易看到的位置。可用 Select Linked 检查接缝是否连续，双侧对称的头部或身体可沿镜像轴接缝，让左右共享同一纹理空间。手册也允许同一网格使用多个不同展开方案。Agent 应记录接缝位置理由、拉伸数据和可见性等级，不能只报告 UV 已生成。",
+    "tags": ["blender", "mesh", "uv", "seam", "stretch", "unwrap", "character", "texture", "official_rule", "project_strategy", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/uv/unwrapping/seams.html",
+    "object_type": "anime_character",
+    "model_type": "blender_uv_seam_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.uv_seams_stretch.v1",
+        "objective": ["minimum_seams", "minimum_stretch", "hide_in_low_visibility_areas"],
+        "records": ["seam_edges", "island_count", "stretch_metrics", "visibility_level"],
+        "symmetric_character_candidate": "seam_along_mirror_axis_to_share_texture_space",
+        "validation": ["test_texture", "uv_editor_review", "target_renderer_or_engine"]
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.uv_layout_and_udims.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "UV 布局与 UDIM：分区展开、整理拉伸，UDIM 需管线确认",
+    "content": "官方 Layout Workflow 建议复杂模型分区域展开，例如头部、耳朵和脖子分别选择合适投影，再缩放移动或 Pack Islands 整理，之后对拉伸区域手动优化或 Minimize Stretch；同拓扑可用 Join UVs 复制，近似表面不同拓扑则用 Mesh Data Transfer。UDIM 用多块贴图分摊不同 UV 区域，主块从 1001 开始，第一行到 1010，下一行在其上方；它适合大面积网格里重要程度不同的区域，但空块不会保存，导入导出与渲染管线必须支持。Agent 应按目标引擎和纹理流程确认是否使用 UDIM，并记录贴图类型、分辨率和块编号。",
+    "tags": ["blender", "mesh", "uv_layout", "pack_islands", "stretch", "udim", "texture", "pipeline", "official_rule", "confidence_high", "requires_validation"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/uv/workflows/layout.html",
+    "object_type": "anime_character",
+    "model_type": "blender_uv_layout_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.uv_layout_and_udims.v1",
+        "layout_checks": ["island_overlap", "texel_density", "stretch", "border_padding", "mirror_or_shared_texture_space"],
+        "transfer_rule": {
+          "same_topology": "join_uvs_candidate",
+          "approximately_same_surface_different_topology": "mesh_data_transfer_candidate"
+        },
+        "udim": {
+          "default": "only_if_pipeline_and_target_support",
+          "main_tile": 1001,
+          "row_layout": "1001_to_1010_then_new_row_above",
+          "record": ["tile_numbers", "texture_types", "resolutions", "empty_tile_policy"]
+        }
+      }
+    }
+  },
+  {
+    "seed_key": "blender.mesh.geometry_data_policy.v1",
+    "entry_type": "generation_params",
+    "collection_name": "generation_params_collection",
+    "title": "几何数据与顶点重排：动画资产优先保护索引稳定性",
+    "content": "官方手册说明 Color Attribute 可按 Vertex 或 Face Corner 存储，数据类型为 Color 或 Byte Color，自定义 Attributes 是按网格元素存储的数据；Reorder Mesh Spatially 不改变可见几何和拓扑，但会改变顶点和面索引，可能破坏依赖稳定索引的 Shape Key、UV 图、外部脚本和已有绑定流程。Agent 应记录颜色/自定义属性的名称、域、类型和用途，并在变换和导出后验证是否保留；对动画或绑定资产默认禁止空间重排，只有静态高分辨率资产且明确不需要索引稳定时才考虑。",
+    "tags": ["blender", "mesh", "color_attribute", "attributes", "geometry_data", "reorder_vertices", "shape_key", "uv", "rigging", "official_rule", "confidence_high"],
+    "source": "https://docs.blender.org/manual/en/latest/modeling/meshes/properties/custom_data.html",
+    "object_type": "anime_character",
+    "model_type": "blender_geometry_data_policy",
+    "best_params": {
+      "modifier_policy": {
+        "rule_id": "blender.mesh.geometry_data_policy.v1",
+        "required_attribute_metadata": ["name", "domain", "data_type", "purpose"],
+        "reorder_policy": {
+          "animated_or_rigged_or_shape_keyed": "avoid",
+          "static_high_resolution": "consider_only_after_index_stability_review"
+        },
+        "post_check": ["attribute_preserved", "uv_preserved", "shape_key_binding_valid", "export_compatibility"]
+      }
+    }
+  }
+]

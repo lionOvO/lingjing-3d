@@ -1,0 +1,18 @@
+numpy==1.26.4
+omegaconf==2.3.0
+Pillow==10.1.0
+einops==0.7.0
+transformers==4.35.0
+trimesh==4.0.5
+rembg
+# rembg imports this runtime during startup, but does not guarantee it is
+# installed when used as a plain pip dependency.
+onnxruntime==1.17.1
+# Recent OpenCV builds require NumPy 2, whereas onnxruntime 1.17.1 is built
+# against NumPy 1.x. This release is compatible with the pinned NumPy above.
+opencv-python-headless==4.8.1.78
+# TripoSR 4.35/tokenizers 0.14 require the pre-0.18 Hub API.
+huggingface-hub<0.18
+imageio[ffmpeg]
+xatlas==0.0.9
+moderngl==5.10.0

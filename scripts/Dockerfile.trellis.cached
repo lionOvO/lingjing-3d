@@ -1,0 +1,2 @@
+FROM lingjing-12a65edbb2-trellis:latest
+COPY app.py /app/app.py

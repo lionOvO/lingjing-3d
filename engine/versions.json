@@ -1,0 +1,25 @@
+{
+  "checked_on": "2026-10-27",
+  "comfyui": {
+    "url": "https://github.com/Comfy-Org/ComfyUI",
+    "commit": "250b2e9551a7bc7a8ebb5beb07e0fecd2983e04a"
+  },
+  "node": {
+    "url": "https://github.com/Aero-Ex/ComfyUI-Trellis2-GGUF",
+    "commit": "b3b9e951874c5fb5c936566c93b908299be08b2c"
+  },
+  "local_patch": "patches/pixal3d-local-20261027.patch",
+  "python": "3.12.10",
+  "torch": "2.8.0+cu128",
+  "torchvision": "0.23.0+cu128",
+  "flash_attn": "2.8.3",
+  "natten": "0.21.6",
+  "triton-windows": "3.4.0.post21",
+  "transformers": "5.2.0",
+  "cumesh_patch": {
+    "patch": "patches/cumesh-memory-20261023.patch",
+    "before_sha256": "a476ca5a3a8738bb30ce93a34fbf577ff6f181936edf56a2ea942d2bac0024f1",
+    "after_sha256": "6452ebc6d7339a590c1287d6117260ae5ed51383215fdc22c0516e3c21d6e5e8",
+    "installed_version": "1.0"
+  }
+}

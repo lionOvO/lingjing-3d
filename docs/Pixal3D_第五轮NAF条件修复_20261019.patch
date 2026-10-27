@@ -1,0 +1,84 @@
+--- before/image_conditioned_proj.py
++++ after/image_conditioned_proj.py
+@@ -404,6 +404,7 @@
+         
+         # NAF upsampler (frozen, no trainable params)
+         self.naf_model = None  # Lazy-loaded on first use to avoid import if not needed
++        self._naf_is_bilinear = False
+ 
+         # Per-axis spatial tile factor for the NAF + proj_grid streaming path. 1 = un-tiled
+         # (current behavior, default). >1 enables a streaming wrapper that tiles NAF and
+@@ -436,6 +437,8 @@
+             import torch.hub
+             device = next(self.model.parameters()).device            
+             cached_repo = self._cached_naf_repo()
++
++            self._naf_is_bilinear = False
+ 
+             # NAF is an optional quality enhancement.  On clean/offline
+             # installs torch.hub may fail (GitHub rate limits) or the native
+@@ -461,6 +464,7 @@
+                         return F.interpolate(features, size=tuple(target_size), mode="bilinear", align_corners=False)
+ 
+                 self.naf_model = _BilinearNAFFallback().to(device)
++                self._naf_is_bilinear = True
+                 print(f"[Trellis2-GGUF] NAF unavailable ({exc}); using bilinear feature upsampling fallback.")
+ 
+             self.naf_model.eval()
+@@ -644,9 +648,9 @@
+         boundary tile so grid_sample's padding_mode='border' recovers the un-tiled border
+         behaviour for them.
+ 
+-        Tiles include the matching DINO feature crop. Supplying the full feature map
+-        for every image tile changes NAF attention dilation and mixes unrelated regions.
+-        This remains an approximation of full-image NAF because RoPE is tile-local.
++        Encode the whole guide once so GroupNorm statistics and RoPE coordinates
++        match full-image NAF. Only the existing neighborhood attention is tiled,
++        with DINO values and globally pooled keys cropped to the same patch cells.
+         """
+         K = int(tile_factor)
+         naf_h, naf_w = self.naf_target_size  # always a 2-tuple of ints
+@@ -693,6 +697,25 @@
+         R3 = grid_pts.shape[0]
+         embed_dim = lr_features_bchw.shape[1]
+         z_proj_hr: Optional[torch.Tensor] = None
++
++        if not self._naf_is_bilinear:
++            guide = image_for_naf
++            if guide.shape[-2] > 4 * naf_h or guide.shape[-1] > 4 * naf_w:
++                guide = F.interpolate(guide, size=(min(guide.shape[-2], 4 * naf_h, 4 * naf_w),
++                                                   min(guide.shape[-1], 4 * naf_w, 4 * naf_h)),
++                                      mode="bilinear", align_corners=False)
++            encoded_image = self.naf_model.image_encoder.forward_encoder(guide, self.naf_target_size)
++            rope = self.naf_model.image_encoder.rope
++            coordinates = rope.create_coordinate(H=naf_h, W=naf_w)
++            encoded_view = encoded_image.reshape(B, rope.num_heads, rope.D_head, -1).transpose(-1, -2)
++            # Reuse native RoPE with global coordinates; bound only its temporary tensors.
++            for start in range(0, naf_h * naf_w, 16384):
++                stop = min(start + 16384, naf_h * naf_w)
++                encoded_view[:, :, start:stop].copy_(rope.rotate(encoded_view[:, :, start:stop], coordinates[start:stop]))
++            global_keys = self.naf_model.key_encoder(encoded_image, lr_features_bchw)
++            # Call-local CPU storage keeps the whole-image guide out of attention's VRAM peak.
++            global_queries = self.naf_model.query_encoder(encoded_image).cpu()
++            del encoded_view, encoded_image
+ 
+         for ti in range(K):
+             for tj in range(K):
+@@ -723,9 +746,14 @@
+                 image_tile = image_for_naf[:, :, img_lo_y:img_hi_y, img_lo_x:img_hi_x].contiguous()
+                 feature_tile = lr_features_bchw[:, :, cell_lo_y:cell_hi_y, cell_lo_x:cell_hi_x].contiguous()
+ 
+-                tile_hr = self.naf_model(
+-                    image_tile, feature_tile, (tile_out_h, tile_out_w)
+-                )  # [B, embed_dim, tile_out_h, tile_out_w]
++                if self._naf_is_bilinear:
++                    tile_hr = self.naf_model(image_tile, feature_tile, (tile_out_h, tile_out_w))
++                else:
++                    tile_hr = self.naf_model.upsampler(
++                        global_queries[:, :, out_lo_y:out_hi_y, out_lo_x:out_hi_x].to(device).contiguous(),
++                        global_keys[:, :, cell_lo_y:cell_hi_y, cell_lo_x:cell_hi_x].contiguous(),
++                        feature_tile,
++                    )  # [B, embed_dim, tile_out_h, tile_out_w]
+ 
+                 if z_proj_hr is None:
+                     z_proj_hr = torch.zeros(

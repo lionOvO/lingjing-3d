@@ -1,0 +1,56 @@
+{
+  "date": "2026-10-27",
+  "engine": "本地 Pixal3D-GGUF Q4_K_M / ComfyUI",
+  "promptId": "1c1fe6b0-d032-42d8-826b-75a8199ee5fd",
+  "reference": "图像生成工具生成的透明底松树参考图",
+  "source": "tmp/home-pine-20261027/pine-original.glb",
+  "geometry": "512 geometry + separate mesh texturing",
+  "texture": 1024,
+  "seed": 20261027,
+  "remesh": false,
+  "note": "独立首页素材；未改变平台生成工作流。风摆为网页动画，不是生成模型自带骨骼动画。",
+  "assets": [
+    {
+      "name": "pine",
+      "triangles": 104460,
+      "bytes": 1495468,
+      "textures": [
+        {
+          "size": [
+            1024,
+            1024
+          ],
+          "mime": "image/webp"
+        },
+        {
+          "size": [
+            1024,
+            1024
+          ],
+          "mime": "image/webp"
+        }
+      ]
+    },
+    {
+      "name": "pine-mobile",
+      "triangles": 42695,
+      "bytes": 846900,
+      "textures": [
+        {
+          "size": [
+            768,
+            768
+          ],
+          "mime": "image/webp"
+        },
+        {
+          "size": [
+            768,
+            768
+          ],
+          "mime": "image/webp"
+        }
+      ]
+    }
+  ]
+}

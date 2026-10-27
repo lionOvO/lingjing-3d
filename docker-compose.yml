@@ -1,0 +1,330 @@
+name: ai-3d-digital-human
+
+x-build-proxy-args: &build-proxy-args
+  HTTP_PROXY: ${HTTP_PROXY:-}
+  HTTPS_PROXY: ${HTTPS_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,host.docker.internal,mysql,redis,minio,milvus,etcd,trellis,qwen2vl,api}
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      args: *build-proxy-args
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [public]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+      args: *build-proxy-args
+    restart: unless-stopped
+    # Expose the API to the local Vite dev server without exposing it to LAN.
+    # Override API_PORT when another local port is already in use.
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DATABASE_URL: mysql+aiomysql://${MYSQL_USER:-app}:${MYSQL_PASSWORD:-app_password}@mysql:3306/${MYSQL_DATABASE:-digital_human}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      MILVUS_HOST: milvus
+      MILVUS_PORT: 19530
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+      TRELLIS_URL: http://trellis:8001
+      QWEN2VL_URL: http://qwen2vl:8002
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-flash}
+      DEEPSEEK_PROXY: ${DEEPSEEK_PROXY:-${HTTPS_PROXY:-}}
+      QWEN2VL_PROVIDER_URL: ${QWEN2VL_PROVIDER_URL:-${ARK_API_URL:-}}
+      QWEN2VL_API_KEY: ${QWEN2VL_API_KEY:-${ARK_API_KEY:-}}
+      QWEN2VL_MODEL: ${QWEN2VL_MODEL:-${ARK_API_MODEL:-qwen-vl-max}}
+      QWEN2VL_INTERNAL_IMAGE_HOSTS: ${QWEN2VL_INTERNAL_IMAGE_HOSTS:-minio}
+      QWEN2VL_INTERNAL_IMAGE_MAX_MB: ${QWEN2VL_INTERNAL_IMAGE_MAX_MB:-10}
+      EMBEDDING_URL: ${EMBEDDING_URL:-${ARK_API_URL:-}}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-${ARK_API_KEY:-}}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-large}
+      AGENT_HTTP_TIMEOUT: ${AGENT_HTTP_TIMEOUT:-120}
+      GENERATION_HTTP_TIMEOUT: ${GENERATION_HTTP_TIMEOUT:-1860}
+      GENERATION_SERVICE_RETRIES: ${GENERATION_SERVICE_RETRIES:-2}
+      GENERATION_RETRY_BACKOFF: ${GENERATION_RETRY_BACKOFF:-0.25}
+      TRELLIS2_MODEL_PATH: ${TRELLIS2_MODEL_PATH:-/models/trellis2}
+      TRIPOSR_MODEL_PATH: ${TRIPOSR_MODEL_PATH:-/models/triposr}
+      TRELLIS_ARTIFACT_DIR: ${TRELLIS_ARTIFACT_DIR:-/artifacts}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://localhost:5173}
+      JWT_SECRET: ${JWT_SECRET:-change-this-jwt-secret}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      ALIBABA_CLOUD_ACCESS_KEY_ID: ${ALIBABA_CLOUD_ACCESS_KEY_ID:-}
+      ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${ALIBABA_CLOUD_ACCESS_KEY_SECRET:-}
+      ALIBABA_SMS_SIGN_NAME: ${ALIBABA_SMS_SIGN_NAME:-}
+      ALIBABA_SMS_TEMPLATE_CODE: ${ALIBABA_SMS_TEMPLATE_CODE:-}
+      ALIBABA_SMS_REGION: ${ALIBABA_SMS_REGION:-cn-hangzhou}
+      ALIBABA_SMS_SCHEME_NAME: ${ALIBABA_SMS_SCHEME_NAME:-}
+    depends_on:
+      mysql: { condition: service_healthy }
+      # The API can serve authentication while optional/model services warm
+      # up. The worker still waits for all service health checks below.
+      redis: { condition: service_started }
+      milvus: { condition: service_started }
+      minio: { condition: service_started }
+      trellis: { condition: service_started }
+      qwen2vl: { condition: service_started }
+    networks: [public, data]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 768M }
+
+  worker:
+    build:
+      context: ./backend
+      args: *build-proxy-args
+    command: celery -A app.worker.celery_app worker --loglevel=INFO --concurrency=1
+    restart: unless-stopped
+    environment:
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,mysql,redis,minio,milvus,etcd,trellis,qwen2vl,api}
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,mysql,redis,minio,milvus,etcd,trellis,qwen2vl,api}
+      DATABASE_URL: mysql+aiomysql://${MYSQL_USER:-app}:${MYSQL_PASSWORD:-app_password}@mysql:3306/${MYSQL_DATABASE:-digital_human}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      MILVUS_HOST: milvus
+      MILVUS_PORT: 19530
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+      TRELLIS_URL: http://trellis:8001
+      QWEN2VL_URL: http://qwen2vl:8002
+      QWEN2VL_PROVIDER_URL: ${QWEN2VL_PROVIDER_URL:-${ARK_API_URL:-}}
+      QWEN2VL_API_KEY: ${QWEN2VL_API_KEY:-${ARK_API_KEY:-}}
+      QWEN2VL_MODEL: ${QWEN2VL_MODEL:-${ARK_API_MODEL:-qwen-vl-max}}
+      EMBEDDING_URL: ${EMBEDDING_URL:-${ARK_API_URL:-}}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-${ARK_API_KEY:-}}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-large}
+      AGENT_HTTP_TIMEOUT: ${AGENT_HTTP_TIMEOUT:-120}
+      GENERATION_HTTP_TIMEOUT: ${GENERATION_HTTP_TIMEOUT:-1860}
+      GENERATION_SERVICE_RETRIES: ${GENERATION_SERVICE_RETRIES:-2}
+      GENERATION_RETRY_BACKOFF: ${GENERATION_RETRY_BACKOFF:-0.25}
+      TRELLIS2_MODEL_PATH: ${TRELLIS2_MODEL_PATH:-/models/trellis2}
+      TRIPOSR_MODEL_PATH: ${TRIPOSR_MODEL_PATH:-/models/triposr}
+      TRELLIS_ARTIFACT_DIR: ${TRELLIS_ARTIFACT_DIR:-/artifacts}
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      milvus: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      trellis: { condition: service_healthy }
+      qwen2vl: { condition: service_healthy }
+    networks: [data, public]
+    volumes:
+      - generation_artifacts:/artifacts
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app inspect ping --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1G }
+
+  mysql:
+    image: mysql:8.0.39
+    restart: unless-stopped
+    command: ["--default-authentication-plugin=mysql_native_password", "--innodb-buffer-pool-size=256M"]
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-digital_human}
+      MYSQL_USER: ${MYSQL_USER:-app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-app_password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+    volumes: [mysql_data:/var/lib/mysql]
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  redis:
+    image: redis:7.2-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes: [redis_data:/data]
+    networks: [data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:RELEASE.2024-06-29T01-20-47Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    volumes: [minio_data:/data]
+    networks: [data]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.12
+    restart: unless-stopped
+    command: etcd --advertise-client-urls=http://etcd:2379 --listen-client-urls=http://0.0.0.0:2379 --data-dir=/etcd
+    volumes: [etcd_data:/etcd]
+    networks: [data]
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    volumes: [milvus_data:/var/lib/milvus]
+    depends_on:
+      etcd: { condition: service_healthy }
+      minio: { condition: service_healthy }
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9091/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+
+  trellis:
+    build:
+      context: ./services/trellis
+      args: *build-proxy-args
+    restart: unless-stopped
+    environment:
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,mysql,redis,minio,milvus,etcd,trellis,qwen2vl,api}
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,mysql,redis,minio,milvus,etcd,trellis,qwen2vl,api}
+      HF_HOME: /hf-cache
+      # The public TRELLIS.2 Space requires outbound access. Set
+      # HF_HUB_OFFLINE=1 in .env only when running a fully local/offline job.
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      U2NET_HOME: /rembg
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
+      LIBGL_ALWAYS_SOFTWARE: "true"
+      MESA_LOADER_DRIVER_OVERRIDE: llvmpipe
+      TRELLIS2_MODEL_PATH: ${TRELLIS2_MODEL_PATH:-/models/trellis2}
+      TRIPOSR_MODEL_PATH: ${TRIPOSR_MODEL_PATH:-/models/triposr}
+      TRELLIS_ARTIFACT_DIR: ${TRELLIS_ARTIFACT_DIR:-/artifacts}
+      TRELLIS_INFERENCE_COMMAND: ${TRELLIS_INFERENCE_COMMAND:-}
+      TRELLIS_INFERENCE_TIMEOUT: ${TRELLIS_INFERENCE_TIMEOUT:-1800}
+      # Optional local ComfyUI bridge. On Windows Docker Desktop, ComfyUI
+      # must listen on 0.0.0.0:8188 for host.docker.internal to reach it.
+      TRELLIS_PROVIDER: ${TRELLIS_PROVIDER:-command}
+      TRELLIS_COMFY_ENABLED: ${TRELLIS_COMFY_ENABLED:-false}
+      TRELLIS_COMFY_URL: ${TRELLIS_COMFY_URL:-http://host.docker.internal:8188}
+      TRELLIS_COMFY_WORKFLOW: ${TRELLIS_COMFY_WORKFLOW:-/app/workflow_6gb.json}
+      TRELLIS_COMFY_OUTPUT_DIR: ${TRELLIS_COMFY_OUTPUT_DIR:-/comfy-output}
+      TRELLIS_COMFY_TIMEOUT: ${TRELLIS_COMFY_TIMEOUT:-2400}
+      TRELLIS_COMFY_POLL_INTERVAL: ${TRELLIS_COMFY_POLL_INTERVAL:-2}
+      # Experimental fallback for high_quality GLB jobs. This sends the source
+      # image to Microsoft's public Hugging Face demo, not a private API.
+      TRELLIS_HF_SPACE_ENABLED: ${TRELLIS_HF_SPACE_ENABLED:-false}
+      TRELLIS_HF_SPACE_ID: ${TRELLIS_HF_SPACE_ID:-microsoft/TRELLIS.2}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ${TRELLIS_MODEL_DIR:-./models}:/models:ro
+      - ${TRELLIS_HF_CACHE_DIR:-./models/hf-cache}:/hf-cache
+      - ${REMBG_MODEL_DIR:-./models/rembg}:/rembg
+      - generation_artifacts:/artifacts
+      # Keep the adapter/workflow synchronized during local development even
+      # when Docker cannot pull the large CUDA base image for a rebuild.
+      - ./services/trellis/app.py:/app/app.py:ro
+      - ./services/trellis/workflow_6gb.json:/app/workflow_6gb.json:ro
+      - ${TRELLIS_COMFY_HOST_OUTPUT_DIR:-./tmp/comfy-output}:/comfy-output:ro
+    # `data` is internal-only; first-run DINO downloads need host-proxy egress.
+    networks: [data, public]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8001/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  qwen2vl:
+    build:
+      context: ./services/qwen2vl
+      args: *build-proxy-args
+    restart: unless-stopped
+    environment:
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,mysql,redis,minio,milvus,etcd,trellis,qwen2vl,api}
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,mysql,redis,minio,milvus,etcd,trellis,qwen2vl,api}
+      QWEN2VL_PROVIDER_URL: ${QWEN2VL_PROVIDER_URL:-${ARK_API_URL:-}}
+      QWEN2VL_API_KEY: ${QWEN2VL_API_KEY:-${ARK_API_KEY:-}}
+      QWEN2VL_MODEL: ${QWEN2VL_MODEL:-${ARK_API_MODEL:-qwen-vl-max}}
+    networks: [data, public]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8002/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+networks:
+  public: {}
+  data:
+    internal: true
+
+volumes:
+  mysql_data:
+  redis_data:
+  minio_data:
+  etcd_data:
+  milvus_data:
+  generation_artifacts:

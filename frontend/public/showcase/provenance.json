@@ -1,0 +1,16 @@
+{
+  "source": "本地生成任务 #33",
+  "note": "首页展示使用简化副本，原始模型保持不变；示例不代表每次生成效果。",
+  "assets": [
+    {
+      "name": "pavilion",
+      "triangles": 81405,
+      "bytes": 1772580
+    },
+    {
+      "name": "pavilion-mobile",
+      "triangles": 35287,
+      "bytes": 860512
+    }
+  ]
+}

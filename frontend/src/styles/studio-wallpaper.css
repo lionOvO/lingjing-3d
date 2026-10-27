@@ -1,0 +1,75 @@
+/* One fixed landscape across routes; readable work surfaces sit above it. */
+:root { --night:#182944; --blue:#253f65; --violet:#3a5578; --mist:#c1d0e2; --glass:rgba(215,232,250,.15); }
+/* Short pages and loading states must keep the same viewport width. */
+html { scrollbar-gutter:stable; scrollbar-color:#7894b1 #203650; }
+@supports not (scrollbar-gutter:stable) { html { overflow-y:scroll; } }
+.studio-shell { isolation:isolate; }
+.studio-sidebar { background:rgba(27,48,76,.94); }
+.studio-topbar { background:rgba(30,53,81,.9); }
+.studio-sidebar,.studio-topbar { backdrop-filter:blur(14px); }
+.studio-nav-link { color:#d3e0ef; font-size:14px; transition:background-color .18s ease,color .18s ease,border-color .18s ease; }
+.studio-group-label { color:#afc3db; font-size:11px; }
+.studio-nav-link.is-active { background:#47668a; border-color:#87a7c8; }
+.studio-nav-link:hover { background:#365575; }
+.studio-breadcrumb,.studio-topbar .account-name,.studio-space-label,.studio-collapse { color:#c3d3e6; }
+.studio-content .eyebrow { color:#c5ddf5; }
+.studio-content { min-height:calc(100vh - 64px); min-height:calc(100dvh - 64px); }
+.studio-content .auth-page { background:transparent; }
+.studio-content .auth-visual { display:none; }
+.studio-content .workflow-index { scrollbar-width:thin; scrollbar-color:#607d9a rgba(10,25,44,.35); }
+
+.studio-content :is(.page-title,.library-heading,.task-center-heading,.task-detail-heading,.section-heading) h1 {
+  text-shadow:0 2px 18px rgba(3,12,27,.65);
+}
+.studio-content :is(.hero-description,.library-heading > div > p,.page-title > p) { color:#d1deee; }
+.studio-content :is(.library-note,.asset-card p,.preset-card p,.library-form label,.task-center-table th) { color:#c5d5e7; }
+.studio-content .library-note { font-size:12px; }
+
+.studio-content :is(.glass-card,.project-card,.rag-card,.library-panel,.asset-card,.task-center-summary,.task-center-history) {
+  background:rgba(42,65,94,.88);
+  border-color:rgba(191,215,241,.4);
+  box-shadow:0 12px 32px rgba(4,13,28,.12);
+}
+.studio-content :is(.glass-card,.project-card,.rag-card,.library-panel) { backdrop-filter:blur(12px); }
+.studio-content :is(.task-progress-card,.task-params-card,.task-result-card,.task-record-card,.task-insight-card,.metric-card,.panel).el-card {
+  background:rgba(42,65,94,.9);
+}
+.studio-content :is(.library-input,.library-select) { background:rgba(49,76,106,.96); color:#f4f8ff; border-color:#8faac5; }
+.studio-content .library-input::placeholder { color:#c0d0e0; }
+.studio-content :is(.library-select option,.library-input) { color-scheme:dark; }
+.studio-content .library-select option { background:#314c6a; color:#f4f8ff; }
+.studio-content .library-button.quiet { color:#edf5ff; background:rgba(172,205,238,.13); border-color:rgba(191,215,241,.42); }
+.studio-content .library-button.quiet:hover { background:rgba(172,205,238,.25); }
+.studio-content :is(.library-toolbar,.task-center-toolbar) {
+  background:rgba(37,61,90,.5);
+  border-radius:8px;
+  padding-left:12px;
+  padding-right:12px;
+}
+/* Neutral stages keep the landscape from changing perceived model colors. */
+.studio-content .asset-preview,.studio-content .compare-slot { background:#28394e; }
+.studio-content .compare-caption { background:rgba(39,61,87,.94); color:#ccdaea; }
+.studio-content .comparison-table { background:rgba(39,61,87,.96); }
+.studio-content .comparison-table th { color:#cbdcee; }
+.studio-content .library-empty { background:rgba(37,61,90,.72); color:#d0dff0; }
+.studio-content .auth-card { background:rgba(42,65,94,.94); backdrop-filter:blur(16px); }
+
+/* Replace the old page immediately, then fade in the new page without moving
+   its layout or changing the containing block of fixed dialogs and tools. */
+.studio-page-enter-active { transition:opacity .18s ease; }
+.studio-page-enter-from { opacity:0; }
+.studio-page-leave-active { display:none; pointer-events:none; }
+
+@media(max-width:760px) {
+  .studio-content { min-height:calc(100vh - 60px); min-height:calc(100dvh - 60px); }
+  .studio-sidebar { background:rgba(27,48,76,.98); }
+  .studio-content :is(.glass-card,.project-card,.rag-card,.library-panel,.asset-card,.task-center-history) { background:rgba(42,65,94,.95); }
+}
+@supports not (backdrop-filter:blur(1px)) {
+  .studio-sidebar,.studio-topbar { background:#1e3551; }
+  .studio-content :is(.glass-card,.project-card,.rag-card,.library-panel,.auth-card) { background:rgba(42,65,94,.98); }
+}
+@media(prefers-reduced-motion:reduce) {
+  .studio-page-enter-active,.studio-page-leave-active { transition:none!important; }
+  .studio-page-enter-from { opacity:1; }
+}

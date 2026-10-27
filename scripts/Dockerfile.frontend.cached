@@ -1,0 +1,5 @@
+# Local recovery build: context contains current frontend/dist and nginx.conf.
+# Reuse the installed Nginx runtime without downloading base images.
+FROM ai-3d-digital-human-frontend:latest
+COPY dist/ /usr/share/nginx/html/
+COPY nginx.conf /etc/nginx/conf.d/default.conf

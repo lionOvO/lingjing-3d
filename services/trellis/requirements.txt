@@ -1,0 +1,9 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+httpx==0.27.2
+pydantic==2.9.2
+# Installed after the legacy TripoSR dependency set in Dockerfile. Its
+# runtime dependencies (httpx/websockets/huggingface-hub) are already pinned
+# by the two requirement files, while installing it with --no-deps avoids an
+# incompatible resolver downgrade of TripoSR's transformers stack.
+gradio_client==1.14.0

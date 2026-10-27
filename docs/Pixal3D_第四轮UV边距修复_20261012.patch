@@ -1,0 +1,22 @@
+--- E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\python_embeded\Lib\site-packages\smart_uv\smart_uv.py.bak-before-island-padding-20261012
++++ E:\ComfyUI-Easy-Install\ComfyUI-Easy-Install\python_embeded\Lib\site-packages\smart_uv\smart_uv.py
+@@ -258,7 +258,7 @@
+         min_dim, max_dim = island['min_dim'], island['max_dim']
+         
+         # 1. Try filling the single hole first
+-        if min_dim <= hole_dw and max_dim <= hole_dh:
++        if min_dim + 2*margin <= hole_dw and max_dim + 2*margin <= hole_dh:
+             phi_rot = 0.0
+             # Matches Blender: hole_rotate == (min_dim == island.uv_diagonal.x)
+             if hole_rotate == (min_dim == w_curr):
+@@ -281,8 +281,8 @@
+             
+             # Update hole leftovers (Blender style)
+             p = [hole_u0, hole_v0, 
+-                 hole_u0 + (max_dim if hole_rotate else min_dim),
+-                 hole_v0 + (min_dim if hole_rotate else max_dim),
++                 hole_u0 + (max_dim if hole_rotate else min_dim) + 2*margin,
++                 hole_v0 + (min_dim if hole_rotate else max_dim) + 2*margin,
+                  hole_u0 + (hole_dh if hole_rotate else hole_dw),
+                  hole_v0 + (hole_dw if hole_rotate else hole_dh)]
+             
