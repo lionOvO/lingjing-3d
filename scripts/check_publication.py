@@ -10,6 +10,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+PRIVATE_DOCUMENT = re.compile(r'(?:简历|求职|面试自我介绍|个人信息|通讯录|项目[一二三四五六七八九十0-9]+开发笔记)', re.I)
 BLOCKED_DIRS = {'.venv','node_modules','__pycache__','dist','.uv-cache','.uv-python',
                 '.codex','.workbuddy','.pytest_cache','.runtime-wheels','tmp','exports',
                 'deliverables','submission_staging','3d-toolchain'}
@@ -36,6 +37,8 @@ def inspect(paths, staged=False):
     issues=[]
     for rel in paths:
         name=rel.as_posix();parts=set(rel.parts)
+        if PRIVATE_DOCUMENT.search(rel.name):
+            issues.append((name,0,'private-personal-document'));continue
         if parts & BLOCKED_DIRS or rel.suffix.lower() in BLOCKED_EXT or \
            (rel.name.startswith('.env') and not rel.name.endswith('.example')) or \
            rel.name=='local-stack.json' or '.bak' in rel.name or \

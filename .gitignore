@@ -68,3 +68,11 @@ models/triposr-weights/
 /gguf_trellis.py
 /orig_trellis.py
 /tmp-*
+
+# Personal documents remain local; do not publish identity-bearing notes.
+*简历*
+*求职*
+*面试自我介绍*
+*个人信息*
+*通讯录*
+*项目[一二三四五六七八九十0-9]*开发笔记*
