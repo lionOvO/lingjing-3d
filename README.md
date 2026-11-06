@@ -56,24 +56,9 @@
 
 ## 3. 系统架构
 
-```mermaid
-flowchart TB
-    UI["Vue 3 / TypeScript / Three.js"] --> N["Nginx 同源入口"]
-    N --> API["FastAPI：认证、业务与文件接口"]
-    API --> DB["MySQL：用户、项目、任务、检查与版本"]
-    API --> S["MinIO：参考图和模型文件"]
-    API --> Q["Redis / Celery：后台生成队列"]
-    Q --> W["Celery Worker"]
-    W --> G["LangGraph 状态工作流"]
-    G --> A["3D HTTP 适配服务"]
-    A --> E["宿主机 ComfyUI / Pixal3D"]
-    E --> F["受限目录中的 GLB 工件"]
-    F --> W
-    W --> S
-    W --> DB
-    API -->|"WebSocket；断线回退 HTTP 查询"| UI
-    G -. "可选参数与失败项参考检索" .-> V["Milvus"]
-```
+![灵境造物系统架构：业务接口、后台生成与数据存储](docs/images/system-architecture.png)
+
+[查看高清图](docs/images/system-architecture.png) · [Mermaid 源文件](docs/images/system-architecture.mmd) · [图片生成脚本](scripts/render_architecture.py)
 
 - **FastAPI** 处理请求与权限，不在请求处理过程中等待整个 GPU 推理。
 - **Celery Worker** 执行长任务，阶段与结果写入数据库。
